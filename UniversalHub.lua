@@ -200,6 +200,11 @@ do
         Values = { "CFrame", "Velocity" },
         Default = "CFrame",
     })
+    F:AddToggle("LegacyFly", {
+        Title = "Legacy Fly",
+        Description = "Original fly (BodyVelocity + BodyGyro). Overrides Fly Mode while on",
+        Default = false,
+    })
     F:AddSlider("FlySpeed", { Title = "Fly Speed", Default = 50, Min = 1, Max = 500, Increment = 1 })
     F:AddKeybind("FlyKey", { Title = "Fly keybind", Mode = "Toggle", Default = "G" })
 
@@ -754,32 +759,26 @@ end
 -- CFrame-based fly: no BodyVelocity/BodyGyro (many games delete those) and no
 -- PlatformStand (which makes you flop to the ground if anything goes wrong).
 -- We keep our own target position so gravity can't make you sink.
-local Fly = { active = false, pos = nil }
+-- Legacy fly (the original version) uses BodyVelocity + BodyGyro + PlatformStand.
+local Fly = { active = false, pos = nil, bv = nil, bg = nil }
+
+local function stopLegacyFly()
+    if not (Fly.bv or Fly.bg) then return end
+    if Fly.bv then Fly.bv:Destroy() end
+    if Fly.bg then Fly.bg:Destroy() end
+    Fly.bv, Fly.bg = nil, nil
+    local hum = getHum()
+    if hum then hum.PlatformStand = false end
+end
 
 local function stopFly()
     Fly.active, Fly.pos = false, nil
+    stopLegacyFly()
     local hrp = getHRP()
     if hrp then hrp.AssemblyLinearVelocity = Vector3.zero end
 end
 
-local function updateFly(dt)
-    local hrp, hum = getHRP(), getHum()
-    if not hrp or not hum then
-        Fly.pos = nil
-        return
-    end
-    Fly.active = true
-
-    -- Let teleports/tweens move us; resync afterwards
-    if tweening then
-        Fly.pos = nil
-        return
-    end
-    if not Fly.pos or (hrp.Position - Fly.pos).Magnitude > 8 then
-        Fly.pos = hrp.Position
-    end
-
-    local cam = workspace.CurrentCamera
+local function getFlyDirection(cam, hum)
     local dir = Vector3.zero
     if not UIS:GetFocusedTextBox() then
         local cf = cam.CFrame
@@ -793,6 +792,57 @@ local function updateFly(dt)
     if dir.Magnitude == 0 and hum.MoveDirection.Magnitude > 0 then
         dir = hum.MoveDirection -- mobile joystick
     end
+    return dir
+end
+
+local function updateLegacyFly(hrp, hum)
+    if not Fly.bv or Fly.bv.Parent ~= hrp or not Fly.bg or Fly.bg.Parent ~= hrp then
+        stopLegacyFly()
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        bv.Velocity = Vector3.zero
+        bv.Parent = hrp
+        local bg = Instance.new("BodyGyro")
+        bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+        bg.P = 9e4
+        bg.CFrame = hrp.CFrame
+        bg.Parent = hrp
+        Fly.bv, Fly.bg = bv, bg
+    end
+    hum.PlatformStand = true
+
+    local cam = workspace.CurrentCamera
+    local dir = getFlyDirection(cam, hum)
+    Fly.bv.Velocity = dir.Magnitude > 0 and dir.Unit * Options.FlySpeed.Value or Vector3.zero
+    Fly.bg.CFrame = cam.CFrame
+end
+
+local function updateFly(dt)
+    local hrp, hum = getHRP(), getHum()
+    if not hrp or not hum then
+        Fly.pos = nil
+        return
+    end
+    Fly.active = true
+
+    if Options.LegacyFly.Value then
+        Fly.pos = nil
+        updateLegacyFly(hrp, hum)
+        return
+    end
+    stopLegacyFly()
+
+    -- Let teleports/tweens move us; resync afterwards
+    if tweening then
+        Fly.pos = nil
+        return
+    end
+    if not Fly.pos or (hrp.Position - Fly.pos).Magnitude > 8 then
+        Fly.pos = hrp.Position
+    end
+
+    local cam = workspace.CurrentCamera
+    local dir = getFlyDirection(cam, hum)
     local speed = Options.FlySpeed.Value
     local moveVel = dir.Magnitude > 0 and dir.Unit * speed or Vector3.zero
     Fly.pos += moveVel * math.min(dt, 0.1)
@@ -1031,7 +1081,7 @@ end
 ----------------------------------------------------------------------
 local ToggleLabels = {
     WalkSpeedEnabled = "WalkSpeed", JumpEnabled = "Jump Height", InfiniteJump = "Infinite Jump",
-    Fly = "Fly", Noclip = "Noclip", GravityEnabled = "Gravity", ClickTP = "Click Teleport",
+    Fly = "Fly", LegacyFly = "Legacy Fly", Noclip = "Noclip", GravityEnabled = "Gravity", ClickTP = "Click Teleport",
     TweenNoclip = "Tween Noclip", Fullbright = "Fullbright", NoFog = "No Fog", FOVEnabled = "Custom FOV",
     InfiniteZoom = "Infinite Zoom", ESP = "ESP", AntiAFK = "Anti-AFK", FPSUnlock = "FPS Unlock",
 }
