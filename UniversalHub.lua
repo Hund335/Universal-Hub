@@ -162,7 +162,7 @@ local Window = Library:CreateWindow({
     SubTitle = "v1.0",
     TabWidth = 160,
     Size = UDim2.fromOffset(600, 480),
-    Acrylic = true,
+    Acrylic = false, -- the acrylic blur (glass part + DepthOfField) costs FPS and makes the camera/mouse feel sluggish
     Theme = "Dark",
     MinimizeKey = Enum.KeyCode.RightShift,
 })
@@ -671,7 +671,14 @@ local function hold(key, enabled, obj, prop, value)
             Orig[key] = saved
         end
         saved.obj = obj
-        if obj[prop] ~= value then obj[prop] = value end
+        local current = obj[prop]
+        -- Numbers are stored as float32 by the engine, so compare with a tolerance
+        -- (otherwise e.g. Gravity 196.2 gets rewritten every single frame)
+        if type(value) == "number" and type(current) == "number" then
+            if math.abs(current - value) > 0.01 then obj[prop] = value end
+        elseif current ~= value then
+            obj[prop] = value
+        end
     elseif saved then
         Orig[key] = nil
         pcall(function()
