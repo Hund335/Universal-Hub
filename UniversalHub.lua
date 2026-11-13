@@ -194,6 +194,12 @@ do
     local F = Tabs.Movement:AddSection("Fly")
     F:AddParagraph({ Title = "Controls", Content = "WASD to move (follows camera), Space = up, LeftControl = down." })
     F:AddToggle("Fly", { Title = "Fly", Default = false })
+    F:AddDropdown("FlyMode", {
+        Title = "Fly Mode",
+        Description = "If you hover but can't move in a game, switch to Velocity",
+        Values = { "CFrame", "Velocity" },
+        Default = "CFrame",
+    })
     F:AddSlider("FlySpeed", { Title = "Fly Speed", Default = 50, Min = 1, Max = 500, Increment = 1 })
     F:AddKeybind("FlyKey", { Title = "Fly keybind", Mode = "Toggle", Default = "G" })
 
@@ -787,16 +793,26 @@ local function updateFly(dt)
     if dir.Magnitude == 0 and hum.MoveDirection.Magnitude > 0 then
         dir = hum.MoveDirection -- mobile joystick
     end
-    if dir.Magnitude > 0 then
-        Fly.pos += dir.Unit * Options.FlySpeed.Value * math.min(dt, 0.1)
-    end
+    local speed = Options.FlySpeed.Value
+    local moveVel = dir.Magnitude > 0 and dir.Unit * speed or Vector3.zero
+    Fly.pos += moveVel * math.min(dt, 0.1)
 
-    -- Face where the camera looks (yaw only, so the character stays upright)
-    local look = cam.CFrame.LookVector * Vector3.new(1, 0, 1)
-    if look.Magnitude < 0.01 then look = hrp.CFrame.LookVector * Vector3.new(1, 0, 1) end
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    hrp.CFrame = CFrame.lookAt(Fly.pos, Fly.pos + look.Unit)
+    if Options.FlyMode.Value == "Velocity" then
+        -- Moves with real velocity (like normal physics), never writes your position.
+        -- A small correction toward the target keeps you from sinking.
+        -- Walls stop you in this mode.
+        local correction = (Fly.pos - hrp.Position) * 10
+        if correction.Magnitude > speed then correction = correction.Unit * speed end
+        hrp.AssemblyLinearVelocity = moveVel + correction
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    else
+        -- CFrame: sets your position directly every frame (passes through walls)
+        local look = cam.CFrame.LookVector * Vector3.new(1, 0, 1)
+        if look.Magnitude < 0.01 then look = hrp.CFrame.LookVector * Vector3.new(1, 0, 1) end
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        hrp.CFrame = CFrame.lookAt(Fly.pos, Fly.pos + look.Unit)
+    end
 end
 
 ----------------------------------------------------------------------
