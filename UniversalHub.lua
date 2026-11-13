@@ -243,11 +243,6 @@ do
             notify("Teleport", "Teleporting to " .. name)
         end,
     })
-
-    local W = Tabs.Teleport:AddSection("Create Waypoint")
-    W:AddParagraph({ Title = "This game", Content = "PlaceId: " .. game.PlaceId .. "\nWaypoints only show up in the game they were saved in." })
-    W:AddInput("WaypointName", { Title = "Name", Default = "", Placeholder = "e.g. Shop, Boss, Spawn" })
-    W:AddInput("WaypointCoords", { Title = "Coordinates (optional)", Default = "", Placeholder = "x, y, z | PlaceId  (empty = current spot)" })
 end
 
 ----------------------------------------------------------------------
@@ -750,33 +745,33 @@ end
 ----------------------------------------------------------------------
 -- Fly
 ----------------------------------------------------------------------
-local Fly = {}
+-- CFrame-based fly: no BodyVelocity/BodyGyro (many games delete those) and no
+-- PlatformStand (which makes you flop to the ground if anything goes wrong).
+-- We keep our own target position so gravity can't make you sink.
+local Fly = { active = false, pos = nil }
 
 local function stopFly()
-    if Fly.bv then Fly.bv:Destroy() end
-    if Fly.bg then Fly.bg:Destroy() end
-    Fly.bv, Fly.bg = nil, nil
-    local hum = getHum()
-    if hum then hum.PlatformStand = false end
+    Fly.active, Fly.pos = false, nil
+    local hrp = getHRP()
+    if hrp then hrp.AssemblyLinearVelocity = Vector3.zero end
 end
 
-local function updateFly()
+local function updateFly(dt)
     local hrp, hum = getHRP(), getHum()
-    if not hrp or not hum then return end
-    if not Fly.bv or Fly.bv.Parent ~= hrp then
-        stopFly()
-        local bv = Instance.new("BodyVelocity")
-        bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        bv.Velocity = Vector3.zero
-        bv.Parent = hrp
-        local bg = Instance.new("BodyGyro")
-        bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-        bg.P = 9e4
-        bg.CFrame = hrp.CFrame
-        bg.Parent = hrp
-        Fly.bv, Fly.bg = bv, bg
+    if not hrp or not hum then
+        Fly.pos = nil
+        return
     end
-    hum.PlatformStand = true
+    Fly.active = true
+
+    -- Let teleports/tweens move us; resync afterwards
+    if tweening then
+        Fly.pos = nil
+        return
+    end
+    if not Fly.pos or (hrp.Position - Fly.pos).Magnitude > 8 then
+        Fly.pos = hrp.Position
+    end
 
     local cam = workspace.CurrentCamera
     local dir = Vector3.zero
@@ -792,8 +787,16 @@ local function updateFly()
     if dir.Magnitude == 0 and hum.MoveDirection.Magnitude > 0 then
         dir = hum.MoveDirection -- mobile joystick
     end
-    Fly.bv.Velocity = dir.Magnitude > 0 and dir.Unit * Options.FlySpeed.Value or Vector3.zero
-    Fly.bg.CFrame = cam.CFrame
+    if dir.Magnitude > 0 then
+        Fly.pos += dir.Unit * Options.FlySpeed.Value * math.min(dt, 0.1)
+    end
+
+    -- Face where the camera looks (yaw only, so the character stays upright)
+    local look = cam.CFrame.LookVector * Vector3.new(1, 0, 1)
+    if look.Magnitude < 0.01 then look = hrp.CFrame.LookVector * Vector3.new(1, 0, 1) end
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    hrp.CFrame = CFrame.lookAt(Fly.pos, Fly.pos + look.Unit)
 end
 
 ----------------------------------------------------------------------
@@ -1107,10 +1110,10 @@ connect(RunService.Stepped, function()
     updateNoclip(false)
 end)
 
-connect(RunService.RenderStepped, function()
+connect(RunService.RenderStepped, function(dt)
     if Options.Fly.Value then
-        updateFly()
-    elseif Fly.bv then
+        updateFly(dt)
+    elseif Fly.active then
         stopFly()
     end
 end)
