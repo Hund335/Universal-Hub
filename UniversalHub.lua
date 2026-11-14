@@ -616,52 +616,200 @@ end
 ----------------------------------------------------------------------
 -- Misc tab
 ----------------------------------------------------------------------
+-- Webhook (Discord). Defined before the Misc UI so other features can use it.
+local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
+local WEBHOOK_EVENTS = {
+    "Automation started", "Automation finished", "Automation error", "Safety stop", "Server hop", "Hub loaded",
+}
+
+local gameNameCache
+local function gameName()
+    if not gameNameCache then
+        local ok, info = pcall(function()
+            return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+        end)
+        gameNameCache = ok and info and info.Name or tostring(game.PlaceId)
+    end
+    return gameNameCache
+end
+
+-- {player} {displayname} {game} {placeid} {jobid} {players} {time} {health} {stat:Coins}
+-- plus any extra keys passed in (e.g. {automation} {loop} {reason})
+local function fillPlaceholders(text, extra)
+    text = tostring(text or "")
+    text = text:gsub("{stat:([^}]+)}", function(name)
+        local stats = LP:FindFirstChild("leaderstats")
+        local v = stats and stats:FindFirstChild(trim(name))
+        return v and tostring(v.Value) or "?"
+    end)
+    local hum = getHum()
+    local values = {
+        player = LP.Name, displayname = LP.DisplayName, game = gameName(),
+        placeid = tostring(game.PlaceId), jobid = game.JobId,
+        players = tostring(#Players:GetPlayers()), time = os.date("%H:%M:%S"),
+        health = hum and tostring(math.floor(hum.Health)) or "0",
+    }
+    for k, v in pairs(extra or {}) do values[k] = tostring(v) end
+    return (text:gsub("{(%w+)}", function(key) return values[key:lower()] end))
+end
+
+-- Sends an embed. `callback(ok, info)` is optional (used by the Test button).
+local function sendWebhook(title, message, color, callback)
+    local url = trim(Options.WebhookURL and Options.WebhookURL.Value or "")
+    local function finish(ok, info) if callback then callback(ok, info) end end
+    if not url:match("^https://") then return finish(false, "No webhook URL set (Misc tab).") end
+    if not httpRequest then return finish(false, "Your executor has no request function.") end
+
+    task.spawn(function()
+        local fields = { { name = "Game", value = gameName(), inline = true } }
+        if Options.WebhookShowPlayer.Value then
+            table.insert(fields, { name = "Player", value = LP.Name, inline = true })
+        end
+        table.insert(fields, { name = "Server", value = #Players:GetPlayers() .. " players", inline = true })
+
+        local ping = trim(Options.WebhookPing.Value or "")
+        local body = {
+            username = "Universal Hub",
+            content = ping:match("^%d+$") and ("<@" .. ping .. ">") or nil,
+            embeds = { {
+                title = title,
+                description = message,
+                color = color or 0x5865F2,
+                fields = fields,
+                timestamp = DateTime.now():ToIsoDate(),
+            } },
+        }
+        local ok, res = pcall(httpRequest, {
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode(body),
+        })
+        local code = ok and type(res) == "table" and tonumber(res.StatusCode) or nil
+        if code and code >= 200 and code < 300 then
+            finish(true, "Sent")
+        else
+            finish(false, ok and ("Discord answered " .. tostring(code)) or tostring(res))
+        end
+    end)
+end
+
+local function webhookEvent(event, title, message, color)
+    local events = Options.WebhookEvents and Options.WebhookEvents.Value
+    if type(events) == "table" and events[event] then
+        sendWebhook(title, message, color)
+    end
+end
+
+-- Re-run the hub after any teleport (server hop, rejoin, game teleports) so
+-- auto-start automations keep going in the new server
+local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+local LOAD_LINE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Universal-Hub/refs/heads/main/UniversalHub.lua"))()'
+local teleportQueued = false
+local function queueHubReload()
+    if teleportQueued or not queueTeleport or not (Options.KeepAfterTeleport and Options.KeepAfterTeleport.Value) then return end
+    teleportQueued = pcall(queueTeleport, LOAD_LINE)
+end
+
+local function rejoin()
+    notify("Server", "Rejoining...", 3, true)
+    queueHubReload()
+    if #Players:GetPlayers() <= 1 then
+        TeleportService:Teleport(game.PlaceId, LP)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
+    end
+end
+
+local function serverHop(reason)
+    notify("Server", "Searching for a server...", 3, true)
+    local ok, body = pcall(function()
+        return game:HttpGet(("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId))
+    end)
+    local okDecode, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or not okDecode or type(data) ~= "table" or type(data.data) ~= "table" then
+        notify("Server", "Couldn't fetch the server list.", 4, true)
+        return false
+    end
+    local candidates = {}
+    for _, s in ipairs(data.data) do
+        if s.id ~= game.JobId and tonumber(s.playing) and tonumber(s.maxPlayers) and s.playing < s.maxPlayers then
+            table.insert(candidates, s)
+        end
+    end
+    if #candidates == 0 then
+        notify("Server", "No other servers with space found.", 4, true)
+        return false
+    end
+    if Options.HopSmallest.Value then
+        table.sort(candidates, function(x, y) return x.playing < y.playing end)
+        while #candidates > 5 do table.remove(candidates) end
+    end
+    local pick = candidates[math.random(1, #candidates)]
+    webhookEvent("Server hop", "Server hop", (reason and (reason .. "\n") or "") .. "Joining a server with " .. tostring(pick.playing) .. " players", 0x3BA55D)
+    queueHubReload()
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, pick.id, LP)
+    return true
+end
+
 do
     local M = Tabs.Misc:AddSection("Session")
     M:AddToggle("AntiAFK", { Title = "Anti-AFK", Description = "Prevents the 20 minute idle kick", Default = true })
 
     local S = Tabs.Misc:AddSection("Server")
-    S:AddButton({
-        Title = "Rejoin",
-        Description = "Rejoins this server",
-        Callback = function()
-            notify("Server", "Rejoining...", 3, true)
-            if #Players:GetPlayers() <= 1 then
-                TeleportService:Teleport(game.PlaceId, LP)
-            else
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
-            end
-        end,
+    S:AddToggle("KeepAfterTeleport", {
+        Title = "Re-run hub after teleport",
+        Description = queueTeleport and "Reloads the hub in the new server (needed for automations to continue after a hop)"
+            or "Not supported by your executor (no queue_on_teleport)",
+        Default = true,
     })
+    S:AddToggle("HopSmallest", { Title = "Hop to smallest servers", Description = "Off = random server with space", Default = false })
+    S:AddButton({ Title = "Rejoin", Description = "Rejoins this server", Callback = rejoin })
     S:AddButton({
         Title = "Server hop",
         Description = "Joins a different public server of this game",
-        Callback = function()
-            notify("Server", "Searching for a server...", 3, true)
-            task.spawn(function()
-                local ok, body = pcall(function()
-                    return game:HttpGet(("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId))
-                end)
-                local okDecode, data = pcall(function() return HttpService:JSONDecode(body) end)
-                if not ok or not okDecode or type(data) ~= "table" or type(data.data) ~= "table" then
-                    return notify("Server", "Couldn't fetch the server list.", 4, true)
-                end
-                local candidates = {}
-                for _, s in ipairs(data.data) do
-                    if s.id ~= game.JobId and tonumber(s.playing) and tonumber(s.maxPlayers) and s.playing < s.maxPlayers then
-                        table.insert(candidates, s.id)
-                    end
-                end
-                if #candidates == 0 then
-                    return notify("Server", "No other servers with space found.", 4, true)
-                end
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[math.random(1, #candidates)], LP)
-            end)
-        end,
+        Callback = function() task.spawn(serverHop) end,
     })
     S:AddButton({ Title = "Copy PlaceId", Callback = function() copy(tostring(game.PlaceId)) end })
     S:AddButton({ Title = "Copy JobId", Callback = function() copy(game.JobId) end })
+
+    local W = Tabs.Misc:AddSection("Discord Webhook")
+    W:AddParagraph({
+        Title = "Placeholders",
+        Content = "Use these in messages: {player} {displayname} {game} {placeid} {jobid} {players} {time} {health} {stat:Coins}. Automation messages also get {automation} and {loop}.",
+    })
+    W:AddInput("WebhookURL", { Title = "Webhook URL", Default = "", Placeholder = "https://discord.com/api/webhooks/..." })
+    W:AddInput("WebhookPing", { Title = "Ping user ID (optional)", Default = "", Placeholder = "Your Discord user ID, e.g. 123456789012345678", Numeric = true })
+    W:AddToggle("WebhookShowPlayer", { Title = "Include player name", Default = true })
+    W:AddDropdown("WebhookEvents", {
+        Title = "Send on",
+        Description = "Events that send a message automatically",
+        Values = WEBHOOK_EVENTS,
+        Multi = true,
+        Default = { "Automation finished", "Automation error", "Safety stop" },
+    })
+    W:AddInput("WebhookMessage", { Title = "Custom message", Default = "{player} is in {game}", Placeholder = "Text for the Send button" })
+    W:AddButton({
+        Title = "Send custom message",
+        Callback = function()
+            sendWebhook("Message", fillPlaceholders(Options.WebhookMessage.Value), nil, function(ok, info)
+                notify("Webhook", ok and "Sent!" or ("Failed: " .. info), 4, true)
+            end)
+        end,
+    })
+    W:AddButton({
+        Title = "Test webhook",
+        Callback = function()
+            sendWebhook("Test", "Universal Hub webhook works.", 0x3BA55D, function(ok, info)
+                notify("Webhook", ok and "Test sent, check Discord." or ("Failed: " .. info), 4, true)
+            end)
+        end,
+    })
 end
+
+connect(LP.OnTeleport, function(state)
+    if state == Enum.TeleportState.Started then queueHubReload() end
+end)
 
 ----------------------------------------------------------------------
 -- Feature state: originals are stored when a feature turns on and
@@ -998,7 +1146,7 @@ local function saveAutomations() saveJSON("automations.json", Automations) end
 local STEP_TYPES = {
     "Teleport", "Walk to", "Fly to", "Interact", "Run code / Fire event",
     "Wait", "Wait until", "Press key", "Click", "Equip tool", "Use tool", "Notify",
-    "Label", "Go to label", "If condition, go to label", "Repeat from label", "Stop automation",
+    "Send webhook", "Server hop", "Label", "Go to label", "If condition, go to label", "Repeat from label", "Stop automation",
 }
 local POSITION_STEPS = { ["Teleport"] = true, ["Walk to"] = true, ["Fly to"] = true }
 local CODE_STEPS = { ["Run code / Fire event"] = true, ["Wait until"] = true, ["If condition, go to label"] = true }
@@ -1080,6 +1228,8 @@ local STEP_HINTS = {
     ["Equip tool"] = "Tool name (part of it is enough). Empty = first tool",
     ["Use tool"] = "Nothing needed: activates the tool you're holding",
     ["Notify"] = "Message to show",
+    ["Send webhook"] = "Message, e.g. {player} has {stat:Coins} coins (loop {loop}). URL is set in the Misc tab",
+    ["Server hop"] = "Optional reason for the webhook. Turn on Auto-start so the automation continues in the new server",
     ["Label"] = "Label name, e.g. farm. Marks a spot other steps can jump to",
     ["Go to label"] = "Label to jump to, e.g. farm",
     ["If condition, go to label"] = "Label to jump to when the condition is true. The condition goes in the editor",
@@ -1146,6 +1296,10 @@ local function stepSummary(s)
         return "Equip " .. (v ~= "" and v or "first tool")
     elseif t == "Notify" then
         return "Notify: " .. shortText(v, 40)
+    elseif t == "Send webhook" then
+        return "Webhook: " .. shortText(v, 40)
+    elseif t == "Server hop" then
+        return "Server hop" .. (v ~= "" and (" (" .. shortText(v, 30) .. ")") or "")
     elseif t == "Label" then
         return "Label: " .. v
     elseif t == "Go to label" then
@@ -1382,7 +1536,18 @@ local function runStep(step, id, automationName, ctx)
         local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
         if tool then tool:Activate() else fail("not holding a tool") end
     elseif t == "Notify" then
-        notify("Automation", v, 3, true)
+        notify("Automation", fillPlaceholders(v, ctx and ctx.extra), 3, true)
+    elseif t == "Send webhook" then
+        sendWebhook(automationName, fillPlaceholders(v ~= "" and v or "Step reached", ctx and ctx.extra), nil, function(ok, info)
+            if not ok then fail("webhook failed: " .. info) end
+        end)
+    elseif t == "Server hop" then
+        if ctx and ctx.testing then
+            return notify("Automation", "Would server hop here (skipped while testing)", 3, true)
+        end
+        if serverHop(automationName .. (v ~= "" and (": " .. v) or "")) then
+            autoSleep(id, 20) -- teleport takes us away; if it fails we carry on afterwards
+        end
     end
 end
 
@@ -1396,6 +1561,56 @@ local function stopAutomation(quiet)
     if not quiet then notify("Automation", "Stopped", 2, true) end
 end
 
+-- Safety stops ------------------------------------------------------
+local SAFETY_ACTIONS = { "Stop", "Server hop", "Rejoin" }
+local friendCache = {}
+
+local function isFriend(p)
+    if friendCache[p.UserId] == nil then
+        local ok, result = pcall(function() return LP:IsFriendsWith(p.UserId) end)
+        friendCache[p.UserId] = ok and result or false
+    end
+    return friendCache[p.UserId]
+end
+
+-- Returns a reason string when a safety rule of automation `a` is broken
+local function checkSafety(a, startedAt)
+    local hrp, hum = getHRP(), getHum()
+    local range = tonumber(a.safetyRange) or 0
+    if range > 0 and hrp then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP and not (a.safetyIgnoreFriends ~= false and isFriend(p)) then
+                local other = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                if other and (other.Position - hrp.Position).Magnitude <= range then
+                    return ("%s came within %d studs"):format(p.Name, range)
+                end
+            end
+        end
+    end
+    local minHealth = tonumber(a.safetyHealth) or 0
+    if minHealth > 0 and hum and hum.Health > 0 and hum.MaxHealth > 0 then
+        local percent = hum.Health / hum.MaxHealth * 100
+        if percent <= minHealth then return ("health dropped to %d%%"):format(math.floor(percent)) end
+    end
+    local minutes = tonumber(a.safetyMinutes) or 0
+    if minutes > 0 and os.clock() - startedAt >= minutes * 60 then
+        return ("time limit of %d minutes reached"):format(minutes)
+    end
+end
+
+local function triggerSafety(a, reason)
+    local action = a.safetyAction or "Stop"
+    stopAutomation(true)
+    setStatus("Safety stop: " .. reason .. "\nAction: " .. action)
+    notify("Safety stop", a.name .. ": " .. reason .. " -> " .. action, 6, true)
+    webhookEvent("Safety stop", "Safety stop: " .. a.name, reason .. "\nAction: " .. action, 0xED4245)
+    if action == "Server hop" then
+        task.delay(1, serverHop, "Safety: " .. reason)
+    elseif action == "Rejoin" then
+        task.delay(1, rejoin)
+    end
+end
+
 local function runAutomation(a, onlyStep)
     if not a then return notify("Automation", "Select an automation first.", 3, true) end
     local steps = onlyStep and { onlyStep } or a.steps
@@ -1405,7 +1620,20 @@ local function runAutomation(a, onlyStep)
     Auto.running = true
     Auto.runId += 1
     local id = Auto.runId
-    if not onlyStep then notify("Automation", "Started \"" .. a.name .. "\"", 2, true) end
+    if not onlyStep then
+        notify("Automation", "Started \"" .. a.name .. "\"", 2, true)
+        webhookEvent("Automation started", "Automation started", a.name, 0x5865F2)
+
+        -- Safety watcher
+        task.spawn(function()
+            local startedAt = os.clock()
+            while autoAlive(id) do
+                local reason = checkSafety(a, startedAt)
+                if reason and autoAlive(id) then return triggerSafety(a, reason) end
+                task.wait(0.5)
+            end
+        end)
+    end
 
     -- Label lookup always uses the full step list (so "Run this step only" can check labels)
     local labels = {}
@@ -1421,7 +1649,10 @@ local function runAutomation(a, onlyStep)
         local ok, err = pcall(function()
             while autoAlive(id) do
                 loops += 1
-                local ctx = { labels = labels, counters = {}, testing = onlyStep ~= nil }
+                local ctx = {
+                    labels = labels, counters = {}, testing = onlyStep ~= nil,
+                    extra = { automation = a.name, loop = loops },
+                }
                 local i, instantSteps = 1, 0
                 while i <= #steps do
                     if not autoAlive(id) then return end
@@ -1459,17 +1690,21 @@ local function runAutomation(a, onlyStep)
         if Auto.runId ~= id then return end -- stopped or replaced by another run
         Auto.running = false
         autoNoclip = false
+        local loopText = ("%d loop%s"):format(loops, loops == 1 and "" or "s")
         if not ok then
             setStatus("Error: " .. tostring(err))
             notify("Automation", "Error: " .. tostring(err), 6, true)
+            if not onlyStep then webhookEvent("Automation error", "Automation error: " .. a.name, tostring(err), 0xED4245) end
         elseif onlyStep then
             setStatus("Ran one step of \"" .. a.name .. "\"")
         elseif stopped then
             setStatus(("Stopped by a Stop step in \"%s\""):format(a.name))
             notify("Automation", "\"" .. a.name .. "\" reached a Stop step", 3, true)
+            webhookEvent("Automation finished", "Automation finished", a.name .. " reached a Stop step after " .. loopText, 0x3BA55D)
         else
-            setStatus(("Finished \"%s\" (%d loop%s)"):format(a.name, loops, loops == 1 and "" or "s"))
+            setStatus(("Finished \"%s\" (%s)"):format(a.name, loopText))
             notify("Automation", "Finished \"" .. a.name .. "\"", 3, true)
+            webhookEvent("Automation finished", "Automation finished", a.name .. " finished after " .. loopText, 0x3BA55D)
         end
     end)
 end
@@ -1764,7 +1999,19 @@ do
     R:AddToggle("AutoLoop", { Title = "Loop", Description = "Repeat the steps when they finish", Default = false })
     R:AddSlider("AutoLoopCount", { Title = "Loop count", Description = "0 = forever", Default = 0, Min = 0, Max = 1000, Increment = 1 })
     R:AddSlider("AutoStepDelay", { Title = "Delay between steps", Default = 0.2, Min = 0, Max = 10, Increment = 0.1, Suffix = "s" })
-    R:AddToggle("AutoStartOnJoin", { Title = "Auto-start when I join", Description = "Starts this automation when the hub loads in this game", Default = false })
+    R:AddToggle("AutoStartOnJoin", { Title = "Auto-start when I join", Description = "Starts this automation when the hub loads in this game (also after a server hop)", Default = false })
+
+    local F = Tabs.Automation:AddSection("Safety (per automation, 0 = off)")
+    F:AddSlider("SafetyRange", { Title = "Stop if a player comes within", Default = 0, Min = 0, Max = 500, Increment = 5, Suffix = " studs" })
+    F:AddToggle("SafetyIgnoreFriends", { Title = "Ignore friends", Default = true })
+    F:AddSlider("SafetyHealth", { Title = "Stop if health drops to", Default = 0, Min = 0, Max = 100, Increment = 1, Suffix = "%" })
+    F:AddSlider("SafetyMinutes", { Title = "Stop after", Default = 0, Min = 0, Max = 600, Increment = 1, Suffix = " min" })
+    F:AddDropdown("SafetyAction", {
+        Title = "When a safety rule triggers",
+        Description = "Server hop + Auto-start keeps farming in a fresh server",
+        Values = SAFETY_ACTIONS,
+        Default = "Stop",
+    })
 
     local S = Tabs.Automation:AddSection("Add Step")
     S:AddDropdown("StepType", { Title = "Action", Values = STEP_TYPES, Default = "Teleport" })
@@ -1933,6 +2180,11 @@ renderAutomations = function()
     Options.AutoLoopCount:SetValue(currentAuto and currentAuto.loopCount or 0)
     Options.AutoStepDelay:SetValue(currentAuto and currentAuto.stepDelay or 0.2)
     Options.AutoStartOnJoin:SetValue(currentAuto and currentAuto.autoStart or false)
+    Options.SafetyRange:SetValue(currentAuto and currentAuto.safetyRange or 0)
+    Options.SafetyIgnoreFriends:SetValue(not currentAuto or currentAuto.safetyIgnoreFriends ~= false)
+    Options.SafetyHealth:SetValue(currentAuto and currentAuto.safetyHealth or 0)
+    Options.SafetyMinutes:SetValue(currentAuto and currentAuto.safetyMinutes or 0)
+    Options.SafetyAction:SetValue(currentAuto and currentAuto.safetyAction or "Stop")
     syncingAuto = false
     renderSteps()
 end
@@ -1973,6 +2225,11 @@ bindAutoSetting("AutoLoop", "loop")
 bindAutoSetting("AutoLoopCount", "loopCount")
 bindAutoSetting("AutoStepDelay", "stepDelay")
 bindAutoSetting("AutoStartOnJoin", "autoStart")
+bindAutoSetting("SafetyRange", "safetyRange")
+bindAutoSetting("SafetyIgnoreFriends", "safetyIgnoreFriends")
+bindAutoSetting("SafetyHealth", "safetyHealth")
+bindAutoSetting("SafetyMinutes", "safetyMinutes")
+bindAutoSetting("SafetyAction", "safetyAction")
 
 Options.AutoRunKey:OnClick(function()
     if UIS:GetFocusedTextBox() then return end
@@ -2034,6 +2291,7 @@ local NotSettings = {
     -- automation fields belong to each saved automation, not to configs
     "AutoSelect", "AutoName", "AutoLoop", "AutoLoopCount", "AutoStepDelay", "AutoStartOnJoin",
     "StepType", "StepValue", "StepSelect", "InsertAfterSelected",
+    "SafetyRange", "SafetyIgnoreFriends", "SafetyHealth", "SafetyMinutes", "SafetyAction",
 }
 local notSettingsSet = {}
 for _, idx in ipairs(NotSettings) do notSettingsSet[idx] = true end
@@ -2249,6 +2507,7 @@ if not hasFS then
     notify("Universal Hub", "Your executor has no file functions: waypoints, scripts and configs won't be saved.", 8, true)
 end
 notify("Universal Hub", "Loaded. RightShift hides the UI.", 5, true)
+webhookEvent("Hub loaded", "Hub loaded", fillPlaceholders("{player} joined {game} ({players} players)"), 0x5865F2)
 
 -- Auto-run scripts marked for this game
 for _, s in ipairs(SavedScripts) do
