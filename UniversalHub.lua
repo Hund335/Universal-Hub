@@ -606,6 +606,15 @@ do
     E:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
     E:AddColorpicker("ESPColor", { Title = "ESP color", Default = Color3.fromRGB(255, 70, 70) })
     E:AddSlider("ESPMaxDistance", { Title = "Max distance", Default = 2000, Min = 50, Max = 10000, Increment = 50, Suffix = " studs" })
+    local hasDrawing = typeof(Drawing) == "table" and typeof(Drawing.new) == "function"
+    E:AddToggle("ESPTracers", {
+        Title = "Tracers",
+        Description = hasDrawing and "Draws a line to each player in their ESP color"
+            or "Not supported by your executor (no Drawing library)",
+        Default = false,
+    })
+    E:AddDropdown("ESPTracerOrigin", { Title = "Tracer start", Values = { "Bottom", "Center", "Mouse", "Top" }, Default = "Bottom" })
+    E:AddSlider("ESPTracerThickness", { Title = "Tracer thickness", Default = 1.5, Min = 1, Max = 5, Increment = 0.5 })
 
     local P = Tabs.Visuals:AddSection("Performance")
     if canFPS then
@@ -1056,6 +1065,7 @@ local function removeESP(p)
     if not e then return end
     pcall(function() e.hl:Destroy() end)
     pcall(function() e.bb:Destroy() end)
+    if e.tracer then pcall(function() e.tracer:Remove() end) end
     ESP[p] = nil
 end
 
@@ -1157,11 +1167,56 @@ local function updateESP()
                 e.label.Text = table.concat(parts, " ")
                 e.label.TextColor3 = color
                 e.bb.Enabled = #parts > 0
+                e.color, e.root, e.shown = color, hrp, true -- used by the tracer pass every frame
             elseif ESP[p] then
                 ESP[p].hl.Enabled = false
                 ESP[p].bb.Enabled = false
+                ESP[p].shown = false
             end
         end
+    end
+end
+
+-- Tracers run every frame (ESP itself refreshes 10x/s), otherwise the lines lag behind
+local canDraw = typeof(Drawing) == "table" and typeof(Drawing.new) == "function"
+local function updateTracers()
+    if not canDraw then return end
+    local enabled = Options.ESP.Value and Options.ESPTracers.Value
+    local cam = workspace.CurrentCamera
+    local origin
+    if enabled and cam then
+        local size = cam.ViewportSize
+        local mode = Options.ESPTracerOrigin.Value
+        if mode == "Center" then
+            origin = size / 2
+        elseif mode == "Mouse" then
+            origin = UIS:GetMouseLocation()
+        elseif mode == "Top" then
+            origin = Vector2.new(size.X / 2, 0)
+        else
+            origin = Vector2.new(size.X / 2, size.Y)
+        end
+    end
+
+    for _, e in pairs(ESP) do
+        local line = e.tracer
+        local visible = false
+        if origin and e.shown and e.root and e.root.Parent then
+            local pos = cam:WorldToViewportPoint(e.root.Position)
+            if pos.Z > 0 then -- in front of the camera
+                if not line then
+                    line = Drawing.new("Line")
+                    e.tracer = line
+                end
+                line.From = origin
+                line.To = Vector2.new(pos.X, pos.Y)
+                line.Color = e.color or Options.ESPColor.Value
+                line.Thickness = Options.ESPTracerThickness.Value
+                line.Transparency = 1
+                visible = true
+            end
+        end
+        if line then line.Visible = visible end
     end
 end
 
@@ -2716,6 +2771,7 @@ connect(RunService.RenderStepped, function(dt)
     elseif Fly.active then
         stopFly()
     end
+    updateTracers()
 end)
 
 connect(RunService.Heartbeat, function(dt)
