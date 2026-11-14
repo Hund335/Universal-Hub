@@ -169,6 +169,7 @@ local Window = Library:CreateWindow({
 })
 
 local Tabs = {
+    Game     = Window:AddTab({ Title = "Game", Icon = "gamepad-2" }),
     Movement = Window:AddTab({ Title = "Movement", Icon = "move" }),
     Teleport = Window:AddTab({ Title = "Teleport", Icon = "map-pin" }),
     Automation = Window:AddTab({ Title = "Automation", Icon = "bot" }),
@@ -2237,6 +2238,229 @@ Options.AutoRunKey:OnClick(function()
 end)
 
 ----------------------------------------------------------------------
+-- Game tab: loads a feature module for the game you're in.
+-- Lookup order (first found wins):
+--   1. local  UniversalHub/games/place_<PlaceId>.lua
+--   2. local  UniversalHub/games/<GameId>.lua
+--   3. GitHub games/place_<PlaceId>.lua
+--   4. GitHub games/<GameId>.lua
+-- GameId covers every place of a game (lobby, matches, ...).
+----------------------------------------------------------------------
+local GameModule = { cleanups = {} }
+local GAME_REPO = "https://raw.githubusercontent.com/Hund335/Universal-Hub/refs/heads/main/games/"
+
+local GAME_TEMPLATE = [==[
+--[[
+    Universal Hub game module
+    Save as  <GameId>.lua        -> whole game (lobby + all places)
+         or  place_<PlaceId>.lua -> one place only
+    Locally: UniversalHub/games/   |   Repo: games/
+    Re-execute the hub after changing it.
+]]
+return {
+    Name = "My Game",
+    Version = "1.0",
+
+    Init = function(hub)
+        -- hub.Tab is this game's tab. Prefix option ids with hub.id() so they
+        -- don't clash with other modules (they still save in your configs).
+        local farm = hub.Tab:AddSection("Farming")
+
+        -- A toggle that runs the function every Interval seconds while it's on
+        hub.autoToggle(farm, hub.id("AutoCollect"), {
+            Title = "Auto collect",
+            Description = "Example: fires the collect remote",
+            Interval = 0.5,
+        }, function()
+            -- your code, e.g.:
+            -- hub.Services.ReplicatedStorage.Remotes.Collect:FireServer()
+        end)
+
+        farm:AddButton({
+            Title = "Teleport to spawn",
+            Callback = function()
+                local spawn = workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+                if spawn then hub.teleport(spawn) else hub.notify("Game", "No spawn found") end
+            end,
+        })
+
+        -- Makes coins() usable in automation conditions / code steps
+        hub.addHelper("coins", function() return hub.stat("Coins") end)
+
+        hub.onUnload(function()
+            -- clean up anything you created (connections made with hub.connect are cleaned automatically)
+        end)
+    end,
+}
+]==]
+
+local function readLocalGameModule(file)
+    if not hasFS then return nil end
+    local path = FOLDER .. "/games/" .. file
+    local ok, exists = pcall(isfile, path)
+    if not ok or not exists then return nil end
+    local okRead, src = pcall(readfile, path)
+    return okRead and src or nil
+end
+
+local function fetchGameModule(file)
+    local ok, body = pcall(function() return game:HttpGet(GAME_REPO .. file) end)
+    if ok and type(body) == "string" and trim(body) ~= "" and not body:match("^%s*404") then
+        return body
+    end
+end
+
+local function findGameModule()
+    local files = { "place_" .. game.PlaceId .. ".lua", game.GameId .. ".lua" }
+    for _, file in ipairs(files) do
+        local src = readLocalGameModule(file)
+        if src then return src, "local file " .. file end
+    end
+    for _, file in ipairs(files) do
+        local src = fetchGameModule(file)
+        if src then return src, "GitHub " .. file end
+    end
+end
+
+local function firePrompt(prompt)
+    if typeof(fireproximityprompt) == "function" and pcall(fireproximityprompt, prompt) then return true end
+    prompt:InputHoldBegin()
+    task.wait(prompt.HoldDuration + 0.05)
+    prompt:InputHoldEnd()
+    return true
+end
+
+-- The `hub` table every module's Init receives
+local function makeGameAPI(tab)
+    local api = {
+        Tab = tab, Window = Window, Library = Library, Options = Options,
+        Player = LP, PlaceId = game.PlaceId, GameId = game.GameId, GameName = gameName(),
+        Services = setmetatable({}, { __index = function(_, name) return game:GetService(name) end }),
+    }
+
+    function api.id(name) return "Game_" .. tostring(name) end
+    function api.notify(title, text, duration) notify(title, text, duration, true) end
+    function api.webhook(title, message, color) sendWebhook(title, fillPlaceholders(message), color) end
+    function api.getCharacter() return LP.Character end
+    api.getRoot, api.getHumanoid = getHRP, getHum
+    api.stat = CodeHelpers.stat
+    api.firePrompt = firePrompt
+    api.serverHop, api.rejoin = serverHop, rejoin
+
+    -- Teleport to a Vector3, CFrame, Part or Model (uses the Teleport tab mode)
+    function api.teleport(target)
+        local cf
+        if typeof(target) == "CFrame" then
+            cf = target
+        elseif typeof(target) == "Vector3" then
+            cf = CFrame.new(target)
+        elseif typeof(target) == "Instance" then
+            cf = (target:IsA("Model") and target:GetPivot() or target.CFrame) + Vector3.new(0, 3, 0)
+        end
+        if cf then teleportTo(cf) end
+    end
+
+    -- Connections made here are disconnected when the hub unloads
+    api.connect = connect
+    function api.onUnload(fn) table.insert(GameModule.cleanups, fn) end
+
+    -- Runs fn every `interval` seconds until the hub unloads (or the returned stop() is called)
+    function api.loop(interval, fn)
+        local running = true
+        task.spawn(function()
+            while running and not Library.Unloaded do
+                local ok, err = pcall(fn)
+                if not ok then warn("[Universal Hub game module] " .. tostring(err)) end
+                task.wait(interval or 0.5)
+            end
+        end)
+        local function stop() running = false end
+        table.insert(GameModule.cleanups, stop)
+        return stop
+    end
+
+    -- Toggle + loop in one: fn runs every Interval seconds while the toggle is on
+    function api.autoToggle(section, idx, config, fn)
+        local toggle = section:AddToggle(idx, {
+            Title = config.Title or idx,
+            Description = config.Description,
+            Default = config.Default or false,
+        })
+        api.loop(config.Interval or 0.5, function()
+            if toggle.Value then fn() end
+        end)
+        return toggle
+    end
+
+    -- Expose a function to automation conditions / code steps, e.g. If coins() > 100
+    function api.addHelper(name, fn) CodeHelpers[name] = fn end
+
+    return api
+end
+
+do
+    local tab = Tabs.Game
+    local info = tab:AddSection("This game")
+    local status = info:AddParagraph({
+        Title = gameName(),
+        Content = ("GameId %d  |  PlaceId %d\nLooking for a game module..."):format(game.GameId, game.PlaceId),
+    })
+    local function setInfo(text)
+        pcall(function() status:SetDesc(("GameId %d  |  PlaceId %d\n%s"):format(game.GameId, game.PlaceId, text)) end)
+    end
+
+    local src, from = findGameModule()
+    if not src then
+        setInfo("No module for this game yet. Use the buttons below to make one.")
+    else
+        local fn, compileErr = loadstring(src)
+        local ok, result = false, compileErr
+        if fn then ok, result = pcall(fn) end
+        local init = ok and (type(result) == "function" and result or (type(result) == "table" and (result.Init or result.init)))
+        if not fn then
+            setInfo("Module from " .. from .. " has a syntax error:\n" .. tostring(compileErr))
+        elseif not ok then
+            setInfo("Module from " .. from .. " errored:\n" .. tostring(result))
+        elseif not init then
+            setInfo("Module from " .. from .. " must return a function or a table with Init.")
+        else
+            local okInit, initErr = pcall(init, makeGameAPI(tab))
+            local name = type(result) == "table" and result.Name or "Game module"
+            local version = type(result) == "table" and result.Version and (" v" .. result.Version) or ""
+            if okInit then
+                GameModule.name = name
+                setInfo(("Loaded %s%s from %s"):format(name, version, from))
+            else
+                setInfo(("%s%s failed in Init:\n%s"):format(name, version, tostring(initErr)))
+                notify("Game module", name .. " failed to load, see the Game tab.", 6, true)
+            end
+        end
+    end
+
+    local tools = tab:AddSection("Module tools")
+    tools:AddButton({
+        Title = "Create local module for this game",
+        Description = "Writes a template to UniversalHub/games/" .. game.GameId .. ".lua (edit it, then re-execute the hub)",
+        Callback = function()
+            if not hasFS then return notify("Game module", "Your executor has no file functions.", 4, true) end
+            local path = FOLDER .. "/games/" .. game.GameId .. ".lua"
+            pcall(function()
+                if not isfolder(FOLDER .. "/games") then makefolder(FOLDER .. "/games") end
+            end)
+            if readLocalGameModule(game.GameId .. ".lua") then
+                return notify("Game module", "A local module already exists: " .. path, 5, true)
+            end
+            local safeName = gameName():gsub('"', "'")
+            local template = GAME_TEMPLATE:gsub('Name = "My Game"', function() return 'Name = "' .. safeName .. '"' end, 1)
+            local ok = pcall(writefile, path, template)
+            notify("Game module", ok and ("Created " .. path) or "Couldn't write the file.", 5, true)
+        end,
+    })
+    tools:AddButton({ Title = "Copy module template", Callback = function() copy(GAME_TEMPLATE) end })
+    tools:AddButton({ Title = "Copy GameId", Callback = function() copy(tostring(game.GameId)) end })
+end
+
+----------------------------------------------------------------------
 -- Settings tab
 ----------------------------------------------------------------------
 local Defaults = {}
@@ -2474,6 +2698,7 @@ unload = function()
 
     pcall(stopAutomation, true)
     pcall(closeEditor)
+    for _, cleanup in ipairs(GameModule.cleanups) do pcall(cleanup) end
     cancelTween()
     pcall(stopFly)
     pcall(restoreNoclip)
