@@ -124,6 +124,7 @@ local function trim(s) return (s or ""):match("^%s*(.-)%s*$") end
 ----------------------------------------------------------------------
 local activeTween
 local tweening = false
+local autoNoclip = false -- set by the automation "Fly to" step
 
 local function cancelTween()
     if activeTween then activeTween:Cancel() end
@@ -170,6 +171,7 @@ local Window = Library:CreateWindow({
 local Tabs = {
     Movement = Window:AddTab({ Title = "Movement", Icon = "move" }),
     Teleport = Window:AddTab({ Title = "Teleport", Icon = "map-pin" }),
+    Automation = Window:AddTab({ Title = "Automation", Icon = "bot" }),
     Scripts  = Window:AddTab({ Title = "Scripts",  Icon = "terminal" }),
     Visuals  = Window:AddTab({ Title = "Visuals",  Icon = "eye" }),
     Misc     = Window:AddTab({ Title = "Misc",     Icon = "wrench" }),
@@ -878,7 +880,7 @@ local function restoreNoclip()
 end
 
 local function updateNoclip(off)
-    local active = not off and (Options.Noclip.Value or (tweening and Options.TweenNoclip.Value))
+    local active = not off and (Options.Noclip.Value or autoNoclip or (tweening and Options.TweenNoclip.Value))
     local char = LP.Character
     if active and char then
         for _, part in ipairs(char:GetDescendants()) do
@@ -983,6 +985,811 @@ local function updateESP()
 end
 
 ----------------------------------------------------------------------
+-- Automation: engine
+----------------------------------------------------------------------
+local VIM do
+    local ok, svc = pcall(function() return game:GetService("VirtualInputManager") end)
+    VIM = ok and svc or nil
+end
+
+local Automations = loadJSON("automations.json", {})
+local function saveAutomations() saveJSON("automations.json", Automations) end
+
+local STEP_TYPES = {
+    "Teleport", "Walk to", "Fly to", "Interact", "Run code / Fire event",
+    "Wait", "Wait until", "Press key", "Click", "Equip tool", "Use tool", "Notify",
+}
+local POSITION_STEPS = { ["Teleport"] = true, ["Walk to"] = true, ["Fly to"] = true }
+local CODE_STEPS = { ["Run code / Fire event"] = true, ["Wait until"] = true }
+local POSITION_HINT = "Empty = your current spot, a waypoint name, or x, y, z"
+local STEP_HINTS = {
+    ["Teleport"] = POSITION_HINT .. " (uses Teleport tab mode/speed)",
+    ["Walk to"] = POSITION_HINT .. " (walks normally, 30s timeout)",
+    ["Fly to"] = POSITION_HINT .. " (flies in a straight line at Fly Speed, noclip on)",
+    ["Interact"] = "Optional filter (prompt text or object name). Uses nearest prompt / click detector in range",
+    ["Run code / Fire event"] = "Opens the code editor: paste your remote / event code",
+    ["Wait"] = "Seconds, e.g. 1.5",
+    ["Wait until"] = "Timeout in seconds (default 30). The condition goes in the editor",
+    ["Press key"] = "Key name, e.g. E, F, One, Space",
+    ["Click"] = "Empty = screen center, or x, y in pixels",
+    ["Equip tool"] = "Tool name (part of it is enough). Empty = first tool",
+    ["Use tool"] = "Nothing needed: activates the tool you're holding",
+    ["Notify"] = "Message to show",
+}
+
+local Auto = { running = false, runId = 0, statusPara = nil }
+
+local function autoAlive(id) return Auto.running and Auto.runId == id end
+
+local function autoSleep(id, seconds)
+    local deadline = os.clock() + (seconds or 0)
+    while os.clock() < deadline do
+        if not autoAlive(id) then return false end
+        task.wait(0.05)
+    end
+    return autoAlive(id)
+end
+
+local function setStatus(text)
+    if Auto.statusPara then pcall(function() Auto.statusPara:SetDesc(text) end) end
+end
+
+local function waitForCharacter(id)
+    while autoAlive(id) do
+        local hum, hrp = getHum(), getHRP()
+        if hum and hrp and hum.Health > 0 then return true end
+        task.wait(0.25)
+    end
+    return false
+end
+
+local function stepCFrame(s)
+    local pos = Vector3.new(s.x, s.y, s.z)
+    local look = Vector3.new(s.lx or 0, 0, s.lz or 0)
+    if look.Magnitude < 0.01 then return CFrame.new(pos) end
+    return CFrame.lookAt(pos, pos + look)
+end
+
+local function shortText(text, len)
+    text = (text or ""):gsub("%s+", " ")
+    if #text > len then text = text:sub(1, len - 3) .. "..." end
+    return text
+end
+
+local function stepSummary(s)
+    local t, v = s.type, s.value or ""
+    if POSITION_STEPS[t] then
+        return t .. " -> " .. (s.label or string.format("%.0f, %.0f, %.0f", s.x, s.y, s.z))
+    elseif t == "Interact" then
+        return "Interact " .. (v ~= "" and ("[" .. v .. "]") or "(nearest)") .. " within " .. (s.range or 20)
+    elseif t == "Run code / Fire event" then
+        return "Code: " .. shortText(s.code, 45)
+    elseif t == "Wait until" then
+        return "Wait until " .. shortText(s.code, 35) .. " (max " .. (v ~= "" and v or "30") .. "s)"
+    elseif t == "Wait" then
+        return "Wait " .. v .. "s"
+    elseif t == "Press key" then
+        return "Press " .. v
+    elseif t == "Click" then
+        return "Click " .. (v ~= "" and v or "screen center")
+    elseif t == "Equip tool" then
+        return "Equip " .. (v ~= "" and v or "first tool")
+    elseif t == "Notify" then
+        return "Notify: " .. shortText(v, 40)
+    end
+    return t
+end
+
+local function findInteractable(range, filter)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    filter = (filter or ""):lower()
+    local best, bestDist
+    for _, d in ipairs(workspace:GetDescendants()) do
+        local isPrompt = d:IsA("ProximityPrompt")
+        if (isPrompt and d.Enabled) or d:IsA("ClickDetector") then
+            local holder = d.Parent
+            if holder and holder:IsA("Attachment") then holder = holder.Parent end
+            local pos
+            if holder and holder:IsA("BasePart") then
+                pos = holder.Position
+            elseif holder and holder:IsA("Model") then
+                pos = holder:GetPivot().Position
+            end
+            if pos then
+                local dist = (pos - hrp.Position).Magnitude
+                if dist <= range and (not bestDist or dist < bestDist) then
+                    local matches = true
+                    if filter ~= "" then
+                        local text = holder.Name .. " " .. d.Name .. " " .. (holder.Parent and holder.Parent.Name or "")
+                        if isPrompt then text ..= " " .. d.ActionText .. " " .. d.ObjectText end
+                        matches = text:lower():find(filter, 1, true) ~= nil
+                    end
+                    if matches then best, bestDist = d, dist end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function triggerInteractable(obj, id)
+    if obj:IsA("ProximityPrompt") then
+        if typeof(fireproximityprompt) == "function" and pcall(fireproximityprompt, obj) then
+            return true
+        end
+        obj:InputHoldBegin()
+        autoSleep(id, obj.HoldDuration + 0.1)
+        obj:InputHoldEnd()
+        return true
+    end
+    if typeof(fireclickdetector) == "function" then
+        return (pcall(fireclickdetector, obj))
+    end
+    return false
+end
+
+local function walkTo(id, target)
+    local deadline, lastIssue = os.clock() + 30, 0
+    while autoAlive(id) and os.clock() < deadline do
+        local hum, hrp = getHum(), getHRP()
+        if not hum or not hrp then return false end
+        if ((target - hrp.Position) * Vector3.new(1, 0, 1)).Magnitude < 2.5 then return true end
+        if os.clock() - lastIssue > 4 then -- MoveTo gives up after ~8s, so re-issue it
+            hum:MoveTo(target)
+            lastIssue = os.clock()
+        end
+        task.wait(0.1)
+    end
+    return false
+end
+
+local function flyTo(id, target)
+    autoNoclip = true
+    while autoAlive(id) do
+        local dt = RunService.Heartbeat:Wait()
+        local hrp = getHRP()
+        if not hrp then break end
+        local delta = target - hrp.Position
+        if delta.Magnitude < 0.5 then break end
+        local move = math.min(delta.Magnitude, Options.FlySpeed.Value * math.min(dt, 0.1))
+        local flat = delta * Vector3.new(1, 0, 1)
+        local rotation = flat.Magnitude > 0.1 and CFrame.lookAt(Vector3.zero, flat.Unit) or (hrp.CFrame - hrp.CFrame.Position)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(hrp.Position + delta.Unit * move) * rotation
+    end
+    autoNoclip = false
+end
+
+local function sendKey(id, name)
+    if not VIM then return false, "VirtualInputManager not available" end
+    name = name:sub(1, 1):upper() .. name:sub(2)
+    local ok, key = pcall(function() return Enum.KeyCode[name] end)
+    if not ok or not key then return false, "Unknown key: " .. name end
+    VIM:SendKeyEvent(true, key, false, game)
+    autoSleep(id, 0.08)
+    VIM:SendKeyEvent(false, key, false, game)
+    return true
+end
+
+local function sendClick(id, value)
+    if not VIM then return false, "VirtualInputManager not available" end
+    local cam = workspace.CurrentCamera
+    local x, y = cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2
+    local nums = {}
+    for n in (value or ""):gmatch("-?%d+%.?%d*") do table.insert(nums, tonumber(n)) end
+    if #nums >= 2 then x, y = nums[1], nums[2] end
+    VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+    autoSleep(id, 0.05)
+    VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    return true
+end
+
+local function runStep(step, id, automationName)
+    if not waitForCharacter(id) then return end
+    local t, v = step.type, step.value or ""
+    local function fail(msg) notify("Automation", automationName .. ": " .. msg, 4, true) end
+
+    if t == "Teleport" then
+        teleportTo(stepCFrame(step))
+        while tweening and autoAlive(id) do task.wait(0.05) end
+    elseif t == "Walk to" then
+        if not walkTo(id, Vector3.new(step.x, step.y, step.z)) and autoAlive(id) then fail("Walk to timed out") end
+    elseif t == "Fly to" then
+        flyTo(id, Vector3.new(step.x, step.y, step.z))
+    elseif t == "Interact" then
+        local obj = findInteractable(step.range or 20, v)
+        if not obj then
+            fail("nothing to interact with nearby")
+        elseif not triggerInteractable(obj, id) then
+            fail("your executor can't fire click detectors")
+        end
+    elseif t == "Run code / Fire event" then
+        local fn, err = loadstring(step.code or "")
+        if not fn then return fail("code error: " .. tostring(err)) end
+        local ok, runErr = pcall(fn)
+        if not ok then fail("code error: " .. tostring(runErr)) end
+    elseif t == "Wait" then
+        autoSleep(id, tonumber(v) or 1)
+    elseif t == "Wait until" then
+        local fn = loadstring("return " .. (step.code or "false")) or loadstring(step.code or "")
+        if not fn then return fail("condition doesn't compile") end
+        local deadline = os.clock() + (tonumber(v) or 30)
+        while autoAlive(id) do
+            local ok, result = pcall(fn)
+            if ok and result then break end
+            if os.clock() > deadline then fail("Wait until timed out") break end
+            task.wait(0.1)
+        end
+    elseif t == "Press key" then
+        local ok, err = sendKey(id, v)
+        if not ok then fail(err) end
+    elseif t == "Click" then
+        local ok, err = sendClick(id, v)
+        if not ok then fail(err) end
+    elseif t == "Equip tool" then
+        local hum, backpack = getHum(), LP:FindFirstChildOfClass("Backpack")
+        local tool
+        for _, item in ipairs(backpack and backpack:GetChildren() or {}) do
+            if item:IsA("Tool") and (v == "" or item.Name:lower():find(v:lower(), 1, true)) then
+                tool = item
+                break
+            end
+        end
+        local held = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+        if tool and hum then
+            hum:EquipTool(tool)
+        elseif not (held and (v == "" or held.Name:lower():find(v:lower(), 1, true))) then
+            fail("no tool matching \"" .. v .. "\"")
+        end
+    elseif t == "Use tool" then
+        local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+        if tool then tool:Activate() else fail("not holding a tool") end
+    elseif t == "Notify" then
+        notify("Automation", v, 3, true)
+    end
+end
+
+local function stopAutomation(quiet)
+    if not Auto.running then return end
+    Auto.running = false
+    Auto.runId += 1
+    autoNoclip = false
+    cancelTween()
+    setStatus("Stopped")
+    if not quiet then notify("Automation", "Stopped", 2, true) end
+end
+
+local function runAutomation(a, onlyStep)
+    if not a then return notify("Automation", "Select an automation first.", 3, true) end
+    local steps = onlyStep and { onlyStep } or a.steps
+    if #steps == 0 then return notify("Automation", "\"" .. a.name .. "\" has no steps yet.", 3, true) end
+
+    stopAutomation(true)
+    Auto.running = true
+    Auto.runId += 1
+    local id = Auto.runId
+    if not onlyStep then notify("Automation", "Started \"" .. a.name .. "\"", 2, true) end
+
+    task.spawn(function()
+        local loops = 0
+        local ok, err = pcall(function()
+            while autoAlive(id) do
+                loops += 1
+                for i, step in ipairs(steps) do
+                    if not autoAlive(id) then return end
+                    setStatus(("%s  |  loop %d  |  step %d/%d\n%s"):format(a.name, loops, i, #steps, stepSummary(step)))
+                    runStep(step, id, a.name)
+                    if (a.stepDelay or 0) > 0 and not autoSleep(id, a.stepDelay) then return end
+                end
+                if onlyStep or not a.loop then break end
+                if (a.loopCount or 0) > 0 and loops >= a.loopCount then break end
+                task.wait()
+            end
+        end)
+        if Auto.runId ~= id then return end -- stopped or replaced by another run
+        Auto.running = false
+        autoNoclip = false
+        if not ok then
+            setStatus("Error: " .. tostring(err))
+            notify("Automation", "Error: " .. tostring(err), 6, true)
+        elseif onlyStep then
+            setStatus("Ran one step of \"" .. a.name .. "\"")
+        else
+            setStatus(("Finished \"%s\" (%d loop%s)"):format(a.name, loops, loops == 1 and "" or "s"))
+            notify("Automation", "Finished \"" .. a.name .. "\"", 3, true)
+        end
+    end)
+end
+
+----------------------------------------------------------------------
+-- Automation: multi-line code editor (Fluent inputs are single-line,
+-- which breaks pasted remote code with comments / newlines)
+----------------------------------------------------------------------
+local editorGui
+
+local function closeEditor()
+    if editorGui then editorGui:Destroy() end
+    editorGui = nil
+end
+
+local function openEditor(title, initial, onSave)
+    closeEditor()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "UH_Editor"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 1000
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = guiParent
+    editorGui = gui
+
+    local frame = Instance.new("Frame")
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.Position = UDim2.fromScale(0.5, 0.5)
+    frame.Size = UDim2.fromOffset(580, 380)
+    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 33)
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(70, 70, 80)
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Position = UDim2.fromOffset(14, 8)
+    titleLabel.Size = UDim2.new(1, -28, 0, 24)
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 15
+    titleLabel.TextColor3 = Color3.new(1, 1, 1)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Text = title
+    titleLabel.Parent = frame
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Position = UDim2.fromOffset(12, 40)
+    scroll.Size = UDim2.new(1, -24, 1, -96)
+    scroll.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 6
+    scroll.CanvasSize = UDim2.new()
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
+    scroll.Parent = frame
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
+
+    local box = Instance.new("TextBox")
+    box.BackgroundTransparency = 1
+    box.Size = UDim2.fromScale(1, 1)
+    box.AutomaticSize = Enum.AutomaticSize.XY
+    box.MultiLine = true
+    box.ClearTextOnFocus = false
+    box.TextWrapped = false
+    box.TextXAlignment = Enum.TextXAlignment.Left
+    box.TextYAlignment = Enum.TextYAlignment.Top
+    box.Font = Enum.Font.Code
+    box.TextSize = 14
+    box.TextColor3 = Color3.fromRGB(230, 230, 235)
+    box.PlaceholderText = "Paste here..."
+    box.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+    box.Text = initial or ""
+    box.Parent = scroll
+    local pad = Instance.new("UIPadding", box)
+    pad.PaddingLeft, pad.PaddingTop, pad.PaddingRight, pad.PaddingBottom =
+        UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8)
+
+    local function makeButton(text, color, xOffset, callback)
+        local b = Instance.new("TextButton")
+        b.AnchorPoint = Vector2.new(1, 1)
+        b.Position = UDim2.new(1, xOffset, 1, -12)
+        b.Size = UDim2.fromOffset(100, 32)
+        b.BackgroundColor3 = color
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 14
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Text = text
+        b.AutoButtonColor = true
+        b.Parent = frame
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        b.MouseButton1Click:Connect(callback)
+    end
+    makeButton("Save", Color3.fromRGB(70, 120, 230), -12, function()
+        local text = box.Text
+        closeEditor()
+        onSave(text)
+    end)
+    makeButton("Cancel", Color3.fromRGB(60, 60, 68), -122, closeEditor)
+end
+
+----------------------------------------------------------------------
+-- Automation: tab UI
+----------------------------------------------------------------------
+local currentAuto, selectedStep
+local syncingAuto = false
+local AutoListSection, StepListSection
+local renderAutomations, renderSteps
+
+local function gameAutomations()
+    local list = {}
+    for _, a in ipairs(Automations) do
+        if tonumber(a.placeId) == game.PlaceId then table.insert(list, a) end
+    end
+    return list
+end
+
+local function findAutomation(name)
+    for i, a in ipairs(Automations) do
+        if tonumber(a.placeId) == game.PlaceId and a.name == name then return a, i end
+    end
+end
+
+local function takenAutoNames()
+    local taken = {}
+    for _, a in ipairs(gameAutomations()) do taken[a.name] = true end
+    return taken
+end
+
+local function resolvePosition(value)
+    value = trim(value)
+    if value == "" then
+        local hrp = getHRP()
+        if not hrp then return nil end
+        return hrp.Position, hrp.CFrame.LookVector, nil
+    end
+    for _, w in ipairs(gameWaypoints()) do
+        if w.name:lower() == value:lower() then
+            return Vector3.new(w.x, w.y, w.z), Vector3.new(w.lx or 0, 0, w.lz or 0), "waypoint \"" .. w.name .. "\""
+        end
+    end
+    local pos = parseCoords(value)
+    return pos, nil, nil
+end
+
+-- Builds a step of `stepType` from `value` (opens the editor for code steps).
+-- `existing` is passed when editing, so the editor starts with the old code.
+local function buildStep(stepType, value, existing, done)
+    local step = { type = stepType }
+    value = trim(value)
+
+    if POSITION_STEPS[stepType] then
+        local pos, look, label = resolvePosition(value)
+        if not pos then
+            return notify("Automation", "Couldn't find that position. Use a waypoint name or x, y, z.", 4, true)
+        end
+        step.x, step.y, step.z = pos.X, pos.Y, pos.Z
+        if look then step.lx, step.lz = look.X, look.Z end
+        step.label = label
+        return done(step)
+    elseif stepType == "Interact" then
+        step.value = value
+        step.range = Options.InteractRange.Value
+        return done(step)
+    elseif CODE_STEPS[stepType] then
+        if stepType == "Wait until" then
+            if value ~= "" and not tonumber(value) then
+                return notify("Automation", "Timeout must be a number of seconds.", 3, true)
+            end
+            step.value = value ~= "" and value or (existing and existing.value) or "30"
+        end
+        local title = stepType == "Wait until"
+            and "Wait until: condition (e.g. workspace.Boss.Humanoid.Health <= 0)"
+            or "Run code / Fire event: paste your code"
+        return openEditor(title, existing and existing.code or "", function(code)
+            if trim(code) == "" then return notify("Automation", "Code was empty, step not saved.", 3, true) end
+            step.code = code
+            done(step)
+        end)
+    elseif stepType == "Wait" then
+        if not tonumber(value) then return notify("Automation", "Enter the number of seconds to wait.", 3, true) end
+    elseif stepType == "Press key" then
+        local name = value:sub(1, 1):upper() .. value:sub(2)
+        local ok, key = pcall(function() return Enum.KeyCode[name] end)
+        if value == "" or not ok or not key then
+            return notify("Automation", "Unknown key. Examples: E, F, Space, One, LeftShift", 4, true)
+        end
+        value = name
+    end
+    step.value = value
+    done(step)
+end
+
+local function stepLabel(i, s) return i .. ". " .. stepSummary(s) end
+
+do
+    local A = Tabs.Automation:AddSection("Automations (this game)")
+    A:AddDropdown("AutoSelect", { Title = "Automation", Values = {}, Default = nil })
+    A:AddInput("AutoName", { Title = "Name", Default = "", Placeholder = "e.g. Coin farm" })
+    A:AddButton({
+        Title = "New automation",
+        Description = "Saved for this game (PlaceId " .. game.PlaceId .. ")",
+        Callback = function()
+            local name = trim(Options.AutoName.Value)
+            if name == "" then name = "Automation" end
+            name = uniqueName(name, takenAutoNames())
+            local a = { name = name, placeId = game.PlaceId, steps = {}, loop = false, loopCount = 0, stepDelay = 0.2, autoStart = false }
+            table.insert(Automations, a)
+            saveAutomations()
+            currentAuto = a
+            Options.AutoName:SetValue("")
+            renderAutomations()
+            notify("Automation", "Created \"" .. name .. "\". Add steps below.", 3, true)
+        end,
+    })
+    A:AddButton({
+        Title = "Rename selected",
+        Description = "Uses the Name field",
+        Callback = function()
+            local name = trim(Options.AutoName.Value)
+            if not currentAuto then return notify("Automation", "Select an automation first.", 3, true) end
+            if name == "" then return notify("Automation", "Type a new name first.", 3, true) end
+            local taken = takenAutoNames()
+            taken[currentAuto.name] = nil
+            currentAuto.name = uniqueName(name, taken)
+            saveAutomations()
+            Options.AutoName:SetValue("")
+            renderAutomations()
+        end,
+    })
+    A:AddButton({
+        Title = "Duplicate selected",
+        Callback = function()
+            if not currentAuto then return notify("Automation", "Select an automation first.", 3, true) end
+            local copyA = HttpService:JSONDecode(HttpService:JSONEncode(currentAuto))
+            copyA.name = uniqueName(currentAuto.name, takenAutoNames())
+            copyA.autoStart = false
+            table.insert(Automations, copyA)
+            saveAutomations()
+            currentAuto = copyA
+            renderAutomations()
+        end,
+    })
+    A:AddButton({
+        Title = "Delete selected",
+        Callback = function()
+            local a = currentAuto
+            if not a then return notify("Automation", "Select an automation first.", 3, true) end
+            Window:Dialog({
+                Title = "Delete automation",
+                Content = "Delete \"" .. a.name .. "\" and all its steps?",
+                Buttons = {
+                    { Title = "Delete", Callback = function()
+                        local _, i = findAutomation(a.name)
+                        if i then table.remove(Automations, i) end
+                        if Auto.running then stopAutomation(true) end
+                        currentAuto, selectedStep = nil, nil
+                        saveAutomations()
+                        renderAutomations()
+                        notify("Automation", "Deleted \"" .. a.name .. "\"", 3, true)
+                    end },
+                    { Title = "Cancel" },
+                },
+            })
+        end,
+    })
+
+    local R = Tabs.Automation:AddSection("Run")
+    Auto.statusPara = R:AddParagraph({ Title = "Status", Content = "Idle" })
+    R:AddButton({ Title = "Run", Description = "Runs the selected automation", Callback = function() runAutomation(currentAuto) end })
+    R:AddButton({ Title = "Stop", Callback = function() stopAutomation() end })
+    R:AddKeybind("AutoRunKey", { Title = "Run / Stop keybind", Mode = "Toggle", Default = "P" })
+    R:AddToggle("AutoLoop", { Title = "Loop", Description = "Repeat the steps when they finish", Default = false })
+    R:AddSlider("AutoLoopCount", { Title = "Loop count", Description = "0 = forever", Default = 0, Min = 0, Max = 1000, Increment = 1 })
+    R:AddSlider("AutoStepDelay", { Title = "Delay between steps", Default = 0.2, Min = 0, Max = 10, Increment = 0.1, Suffix = "s" })
+    R:AddToggle("AutoStartOnJoin", { Title = "Auto-start when I join", Description = "Starts this automation when the hub loads in this game", Default = false })
+
+    local S = Tabs.Automation:AddSection("Add Step")
+    S:AddDropdown("StepType", { Title = "Action", Values = STEP_TYPES, Default = "Teleport" })
+    S:AddInput("StepValue", { Title = "Value", Default = "", Placeholder = "see hint below the title" })
+    S:AddSlider("InteractRange", { Title = "Interact range", Description = "Used by new Interact steps", Default = 20, Min = 5, Max = 200, Increment = 1, Suffix = " studs" })
+    S:AddToggle("InsertAfterSelected", { Title = "Insert after selected step", Description = "Off = add to the end", Default = false })
+    S:AddButton({
+        Title = "Add step",
+        Callback = function()
+            local a = currentAuto
+            if not a then return notify("Automation", "Create or select an automation first.", 3, true) end
+            buildStep(Options.StepType.Value, Options.StepValue.Value, nil, function(step)
+                local index = #a.steps + 1
+                if Options.InsertAfterSelected.Value and selectedStep and a.steps[selectedStep] then
+                    index = selectedStep + 1
+                end
+                table.insert(a.steps, index, step)
+                selectedStep = index
+                saveAutomations()
+                Options.StepValue:SetValue("")
+                renderSteps()
+                notify("Automation", "Added: " .. stepSummary(step), 2)
+            end)
+        end,
+    })
+
+    local E = Tabs.Automation:AddSection("Edit Selected Step")
+    E:AddDropdown("StepSelect", { Title = "Step", Values = {}, Default = nil })
+    local function withStep(fn)
+        return function()
+            local a = currentAuto
+            local s = a and selectedStep and a.steps[selectedStep]
+            if not s then return notify("Automation", "Select a step first (click it in the list).", 3, true) end
+            fn(a, s, selectedStep)
+        end
+    end
+    E:AddButton({ Title = "Run this step only", Callback = withStep(function(a, s) runAutomation(a, s) end) })
+    E:AddButton({
+        Title = "Edit step",
+        Description = "Position steps: re-captures from the Value field (empty = current spot). Code steps: opens the editor",
+        Callback = withStep(function(a, s, i)
+            buildStep(s.type, Options.StepValue.Value, s, function(step)
+                a.steps[i] = step
+                saveAutomations()
+                Options.StepValue:SetValue("")
+                renderSteps()
+                notify("Automation", "Updated: " .. stepSummary(step), 2)
+            end)
+        end),
+    })
+    E:AddButton({
+        Title = "Move up",
+        Callback = withStep(function(a, s, i)
+            if i <= 1 then return end
+            a.steps[i], a.steps[i - 1] = a.steps[i - 1], a.steps[i]
+            selectedStep = i - 1
+            saveAutomations()
+            renderSteps()
+        end),
+    })
+    E:AddButton({
+        Title = "Move down",
+        Callback = withStep(function(a, s, i)
+            if i >= #a.steps then return end
+            a.steps[i], a.steps[i + 1] = a.steps[i + 1], a.steps[i]
+            selectedStep = i + 1
+            saveAutomations()
+            renderSteps()
+        end),
+    })
+    E:AddButton({
+        Title = "Duplicate step",
+        Callback = withStep(function(a, s, i)
+            table.insert(a.steps, i + 1, HttpService:JSONDecode(HttpService:JSONEncode(s)))
+            selectedStep = i + 1
+            saveAutomations()
+            renderSteps()
+        end),
+    })
+    E:AddButton({
+        Title = "Delete step",
+        Callback = withStep(function(a, s, i)
+            table.remove(a.steps, i)
+            selectedStep = math.min(i, #a.steps)
+            if selectedStep == 0 then selectedStep = nil end
+            saveAutomations()
+            renderSteps()
+        end),
+    })
+
+    local X = Tabs.Automation:AddSection("Share")
+    X:AddButton({
+        Title = "Export selected to clipboard",
+        Description = "Copies the automation as text so you can back it up or share it",
+        Callback = function()
+            if not currentAuto then return notify("Automation", "Select an automation first.", 3, true) end
+            copy(HttpService:JSONEncode(currentAuto))
+        end,
+    })
+    X:AddButton({
+        Title = "Import automation",
+        Description = "Paste exported text; it's added to this game",
+        Callback = function()
+            openEditor("Import automation: paste exported text", "", function(text)
+                local ok, data = pcall(function() return HttpService:JSONDecode(text) end)
+                if not ok or type(data) ~= "table" or type(data.steps) ~= "table" then
+                    return notify("Automation", "That isn't a valid exported automation.", 4, true)
+                end
+                data.placeId = game.PlaceId
+                data.name = uniqueName(tostring(data.name or "Imported"), takenAutoNames())
+                data.autoStart = false
+                table.insert(Automations, data)
+                saveAutomations()
+                currentAuto = data
+                renderAutomations()
+                notify("Automation", "Imported \"" .. data.name .. "\"", 3, true)
+            end)
+        end,
+    })
+
+    StepListSection = Tabs.Automation:AddSection("Steps (click to select)")
+end
+
+local stepButtons = {}
+renderSteps = function()
+    for _, b in ipairs(stepButtons) do pcall(function() b:Destroy() end) end
+    table.clear(stepButtons)
+
+    local a = currentAuto
+    local labels = {}
+    if not a then
+        table.insert(stepButtons, StepListSection:AddButton({ Title = "No automation selected", Description = "Create or select one above", Callback = function() end }))
+    elseif #a.steps == 0 then
+        table.insert(stepButtons, StepListSection:AddButton({ Title = "No steps yet", Description = "Add one in the Add Step section", Callback = function() end }))
+    else
+        for i, s in ipairs(a.steps) do
+            local label = stepLabel(i, s)
+            labels[i] = label
+            table.insert(stepButtons, StepListSection:AddButton({
+                Title = (i == selectedStep and "> " or "") .. i .. ". " .. s.type,
+                Description = stepSummary(s),
+                Callback = function()
+                    selectedStep = i
+                    renderSteps()
+                end,
+            }))
+        end
+    end
+
+    if selectedStep and not (a and a.steps[selectedStep]) then selectedStep = nil end
+    syncingAuto = true
+    Options.StepSelect:SetValues(labels)
+    Options.StepSelect:SetValue(selectedStep and labels[selectedStep] or nil)
+    syncingAuto = false
+end
+
+renderAutomations = function()
+    local names = {}
+    for _, a in ipairs(gameAutomations()) do table.insert(names, a.name) end
+    if currentAuto and not findAutomation(currentAuto.name) then currentAuto = nil end
+
+    syncingAuto = true
+    Options.AutoSelect:SetValues(names)
+    Options.AutoSelect:SetValue(currentAuto and currentAuto.name or nil)
+    Options.AutoLoop:SetValue(currentAuto and currentAuto.loop or false)
+    Options.AutoLoopCount:SetValue(currentAuto and currentAuto.loopCount or 0)
+    Options.AutoStepDelay:SetValue(currentAuto and currentAuto.stepDelay or 0.2)
+    Options.AutoStartOnJoin:SetValue(currentAuto and currentAuto.autoStart or false)
+    syncingAuto = false
+    renderSteps()
+end
+
+-- Wiring for the automation controls
+Options.AutoSelect:OnChanged(function(name)
+    if syncingAuto then return end
+    currentAuto = name and findAutomation(name) or nil
+    selectedStep = nil
+    renderAutomations()
+end)
+Options.StepSelect:OnChanged(function(label)
+    if syncingAuto then return end
+    local i = label and tonumber(label:match("^(%d+)%."))
+    if i ~= selectedStep then
+        selectedStep = i
+        renderSteps()
+    end
+end)
+Options.StepType:OnChanged(function(stepType)
+    pcall(function() Options.StepValue:SetDesc(STEP_HINTS[stepType] or "") end)
+end)
+
+local function bindAutoSetting(idx, field)
+    Options[idx]:OnChanged(function(value)
+        if syncingAuto or not currentAuto then return end
+        currentAuto[field] = value
+        if field == "autoStart" and value then
+            -- only one automation per game auto-starts
+            for _, other in ipairs(gameAutomations()) do
+                if other ~= currentAuto then other.autoStart = false end
+            end
+        end
+        saveAutomations()
+    end)
+end
+bindAutoSetting("AutoLoop", "loop")
+bindAutoSetting("AutoLoopCount", "loopCount")
+bindAutoSetting("AutoStepDelay", "stepDelay")
+bindAutoSetting("AutoStartOnJoin", "autoStart")
+
+Options.AutoRunKey:OnClick(function()
+    if UIS:GetFocusedTextBox() then return end
+    if Auto.running then stopAutomation() else runAutomation(currentAuto) end
+end)
+
+----------------------------------------------------------------------
 -- Settings tab
 ----------------------------------------------------------------------
 local Defaults = {}
@@ -1034,6 +1841,9 @@ end
 local NotSettings = {
     "TPPlayer", "WaypointName", "WaypointCoords", "WaypointSelect", "WaypointRename",
     "ScriptName", "ScriptSource", "ScriptSelect",
+    -- automation fields belong to each saved automation, not to configs
+    "AutoSelect", "AutoName", "AutoLoop", "AutoLoopCount", "AutoStepDelay", "AutoStartOnJoin",
+    "StepType", "StepValue", "StepSelect", "InsertAfterSelected",
 }
 local notSettingsSet = {}
 for _, idx in ipairs(NotSettings) do notSettingsSet[idx] = true end
@@ -1214,6 +2024,8 @@ unload = function()
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
     table.clear(Connections)
 
+    pcall(stopAutomation, true)
+    pcall(closeEditor)
     cancelTween()
     pcall(stopFly)
     pcall(restoreNoclip)
@@ -1233,6 +2045,11 @@ if getgenv then getgenv().UniversalHub_Unload = unload end
 refreshPlayers()
 renderWaypoints()
 renderScripts()
+do -- preselect this game's first automation
+    local list = gameAutomations()
+    currentAuto = list[1]
+    renderAutomations()
+end
 
 Window:SelectTab(1)
 SaveManager:LoadAutoloadConfig()
@@ -1247,5 +2064,18 @@ notify("Universal Hub", "Loaded. RightShift hides the UI.", 5, true)
 for _, s in ipairs(SavedScripts) do
     if type(s.autorun) == "table" and s.autorun[placeKey] then
         runScript(s)
+    end
+end
+
+-- Auto-start the automation marked for this game (after scripts had a moment to load)
+for _, a in ipairs(gameAutomations()) do
+    if a.autoStart then
+        currentAuto = a
+        renderAutomations()
+        notify("Automation", "Auto-starting \"" .. a.name .. "\" in 3s (press " .. tostring(Options.AutoRunKey.Value) .. " to stop)", 4, true)
+        task.delay(3, function()
+            if not unloaded then runAutomation(a) end
+        end)
+        break
     end
 end
