@@ -42,7 +42,7 @@ return {
         end
 
         local function update()
-            local solo = #Players:GetPlayers() == 1
+            local solo = false
             set(toggle.Value and solo)
             if not toggle.Value then
                 status:SetDesc("Off")
