@@ -998,9 +998,74 @@ local function saveAutomations() saveJSON("automations.json", Automations) end
 local STEP_TYPES = {
     "Teleport", "Walk to", "Fly to", "Interact", "Run code / Fire event",
     "Wait", "Wait until", "Press key", "Click", "Equip tool", "Use tool", "Notify",
+    "Label", "Go to label", "If condition, go to label", "Repeat from label", "Stop automation",
 }
 local POSITION_STEPS = { ["Teleport"] = true, ["Walk to"] = true, ["Fly to"] = true }
-local CODE_STEPS = { ["Run code / Fire event"] = true, ["Wait until"] = true }
+local CODE_STEPS = { ["Run code / Fire event"] = true, ["Wait until"] = true, ["If condition, go to label"] = true }
+-- Control-flow steps run instantly: no "delay between steps" after them
+local CONTROL_STEPS = {
+    ["Label"] = true, ["Go to label"] = true, ["If condition, go to label"] = true,
+    ["Repeat from label"] = true, ["Stop automation"] = true,
+}
+
+-- "label, times" -> "label", times
+local function parseRepeat(value)
+    local label, times = (value or ""):match("^%s*(.-)%s*,%s*(%d+)%s*$")
+    if not label or label == "" then return nil end
+    return label, tonumber(times)
+end
+
+-- Helpers available inside Run code / Wait until / If conditions
+local scriptEnv = (getfenv and getfenv()) or _G
+local CodeHelpers = {
+    player = LP,
+    char = function() return LP.Character end,
+    hrp = getHRP,
+    hum = getHum,
+    stat = function(name) -- leaderstats value, e.g. stat("Coins")
+        local stats = LP:FindFirstChild("leaderstats")
+        local v = stats and stats:FindFirstChild(name)
+        return v and v.Value
+    end,
+    health = function()
+        local h = getHum()
+        return h and h.Health or 0
+    end,
+    dist = function(x, y, z) -- distance to a position / part / model
+        local hrp = getHRP()
+        if not hrp then return math.huge end
+        local target = x
+        if typeof(x) == "number" then target = Vector3.new(x, y, z)
+        elseif typeof(x) == "Instance" then target = x:IsA("Model") and x:GetPivot().Position or x.Position end
+        return (hrp.Position - target).Magnitude
+    end,
+    hasTool = function(name)
+        name = (name or ""):lower()
+        for _, container in ipairs({ LP:FindFirstChildOfClass("Backpack"), LP.Character }) do
+            for _, item in ipairs(container and container:GetChildren() or {}) do
+                if item:IsA("Tool") and item.Name:lower():find(name, 1, true) then return true end
+            end
+        end
+        return false
+    end,
+    find = function(name) return workspace:FindFirstChild(name, true) end,
+}
+
+local function compileUserCode(src, asExpression)
+    local fn, err
+    if asExpression then fn = loadstring("return " .. src) end
+    if not fn then fn, err = loadstring(src) end
+    if fn and setfenv then
+        pcall(setfenv, fn, setmetatable({}, {
+            __index = function(_, key)
+                local helper = CodeHelpers[key]
+                if helper ~= nil then return helper end
+                return scriptEnv[key]
+            end,
+        }))
+    end
+    return fn, err
+end
 local POSITION_HINT = "Empty = your current spot, a waypoint name, or x, y, z"
 local STEP_HINTS = {
     ["Teleport"] = POSITION_HINT .. " (uses Teleport tab mode/speed)",
@@ -1015,6 +1080,11 @@ local STEP_HINTS = {
     ["Equip tool"] = "Tool name (part of it is enough). Empty = first tool",
     ["Use tool"] = "Nothing needed: activates the tool you're holding",
     ["Notify"] = "Message to show",
+    ["Label"] = "Label name, e.g. farm. Marks a spot other steps can jump to",
+    ["Go to label"] = "Label to jump to, e.g. farm",
+    ["If condition, go to label"] = "Label to jump to when the condition is true. The condition goes in the editor",
+    ["Repeat from label"] = "label, times  e.g. farm, 5  (jumps back 5 times, then continues)",
+    ["Stop automation"] = "Nothing needed: ends the run (also stops looping)",
 }
 
 local Auto = { running = false, runId = 0, statusPara = nil }
@@ -1076,6 +1146,17 @@ local function stepSummary(s)
         return "Equip " .. (v ~= "" and v or "first tool")
     elseif t == "Notify" then
         return "Notify: " .. shortText(v, 40)
+    elseif t == "Label" then
+        return "Label: " .. v
+    elseif t == "Go to label" then
+        return "Go to " .. v
+    elseif t == "If condition, go to label" then
+        return "If " .. shortText(s.code, 35) .. " -> go to " .. v
+    elseif t == "Repeat from label" then
+        local label, times = parseRepeat(v)
+        return "Repeat from " .. tostring(label) .. " (" .. tostring(times) .. "x)"
+    elseif t == "Stop automation" then
+        return "Stop automation"
     end
     return t
 end
@@ -1185,10 +1266,65 @@ local function sendClick(id, value)
     return true
 end
 
-local function runStep(step, id, automationName)
+-- Control-flow steps. Returns "jump", targetIndex | "stop" | nil (continue).
+-- ctx = { labels = {lowername = index}, counters = {}, index = n, testing = bool }
+local function runControlStep(step, ctx, fail)
+    local t, v = step.type, trim(step.value or "")
+    local function target(label)
+        local index = ctx.labels[(label or ""):lower()]
+        if not index then fail("label \"" .. tostring(label) .. "\" doesn't exist") end
+        return index
+    end
+
+    if t == "Label" then
+        return nil
+    elseif t == "Go to label" then
+        local index = target(v)
+        if ctx.testing then
+            if index then notify("Automation", "Would jump to step " .. index .. " (" .. v .. ")", 3, true) end
+            return nil
+        end
+        if index then return "jump", index end
+    elseif t == "If condition, go to label" then
+        local fn, err = compileUserCode(step.code or "false", true)
+        if not fn then return fail("condition doesn't compile: " .. tostring(err)) end
+        local ok, result = pcall(fn)
+        if not ok then return fail("condition error: " .. tostring(result)) end
+        if ctx.testing then
+            notify("Automation", "Condition is " .. (result and "TRUE (would jump to " .. v .. ")" or "FALSE (would continue)"), 4, true)
+            return nil
+        end
+        if result then
+            local index = target(v)
+            if index then return "jump", index end
+        end
+    elseif t == "Repeat from label" then
+        local label, times = parseRepeat(v)
+        if not label then return fail("Repeat needs \"label, times\"") end
+        local index = target(label)
+        if ctx.testing or not index then return nil end
+        local count = ctx.counters[ctx.index] or 0
+        if count < times then
+            ctx.counters[ctx.index] = count + 1
+            return "jump", index
+        end
+        ctx.counters[ctx.index] = 0 -- reset so an outer loop can repeat it again
+    elseif t == "Stop automation" then
+        if ctx.testing then
+            notify("Automation", "Would stop the automation here", 3, true)
+            return nil
+        end
+        return "stop"
+    end
+    return nil
+end
+
+local function runStep(step, id, automationName, ctx)
+    local function fail(msg) notify("Automation", automationName .. ": " .. msg, 4, true) end
+    if CONTROL_STEPS[step.type] then return runControlStep(step, ctx, fail) end
+
     if not waitForCharacter(id) then return end
     local t, v = step.type, step.value or ""
-    local function fail(msg) notify("Automation", automationName .. ": " .. msg, 4, true) end
 
     if t == "Teleport" then
         teleportTo(stepCFrame(step))
@@ -1205,15 +1341,15 @@ local function runStep(step, id, automationName)
             fail("your executor can't fire click detectors")
         end
     elseif t == "Run code / Fire event" then
-        local fn, err = loadstring(step.code or "")
+        local fn, err = compileUserCode(step.code or "", false)
         if not fn then return fail("code error: " .. tostring(err)) end
         local ok, runErr = pcall(fn)
         if not ok then fail("code error: " .. tostring(runErr)) end
     elseif t == "Wait" then
         autoSleep(id, tonumber(v) or 1)
     elseif t == "Wait until" then
-        local fn = loadstring("return " .. (step.code or "false")) or loadstring(step.code or "")
-        if not fn then return fail("condition doesn't compile") end
+        local fn, err = compileUserCode(step.code or "false", true)
+        if not fn then return fail("condition doesn't compile: " .. tostring(err)) end
         local deadline = os.clock() + (tonumber(v) or 30)
         while autoAlive(id) do
             local ok, result = pcall(fn)
@@ -1271,16 +1407,49 @@ local function runAutomation(a, onlyStep)
     local id = Auto.runId
     if not onlyStep then notify("Automation", "Started \"" .. a.name .. "\"", 2, true) end
 
+    -- Label lookup always uses the full step list (so "Run this step only" can check labels)
+    local labels = {}
+    for index, s in ipairs(a.steps) do
+        if s.type == "Label" and trim(s.value or "") ~= "" then
+            labels[trim(s.value):lower()] = labels[trim(s.value):lower()] or index
+        end
+    end
+
     task.spawn(function()
         local loops = 0
+        local stopped = false
         local ok, err = pcall(function()
             while autoAlive(id) do
                 loops += 1
-                for i, step in ipairs(steps) do
+                local ctx = { labels = labels, counters = {}, testing = onlyStep ~= nil }
+                local i, instantSteps = 1, 0
+                while i <= #steps do
                     if not autoAlive(id) then return end
+                    local step = steps[i]
+                    ctx.index = i
                     setStatus(("%s  |  loop %d  |  step %d/%d\n%s"):format(a.name, loops, i, #steps, stepSummary(step)))
-                    runStep(step, id, a.name)
-                    if (a.stepDelay or 0) > 0 and not autoSleep(id, a.stepDelay) then return end
+                    local action, target = runStep(step, id, a.name, ctx)
+
+                    if action == "stop" then
+                        stopped = true
+                        return
+                    elseif action == "jump" then
+                        i = target
+                    else
+                        i += 1
+                    end
+
+                    if CONTROL_STEPS[step.type] then
+                        -- jumps with no real actions in between could freeze the game
+                        instantSteps += 1
+                        if instantSteps >= 50 then
+                            instantSteps = 0
+                            task.wait()
+                        end
+                    else
+                        instantSteps = 0
+                        if (a.stepDelay or 0) > 0 and not autoSleep(id, a.stepDelay) then return end
+                    end
                 end
                 if onlyStep or not a.loop then break end
                 if (a.loopCount or 0) > 0 and loops >= a.loopCount then break end
@@ -1295,6 +1464,9 @@ local function runAutomation(a, onlyStep)
             notify("Automation", "Error: " .. tostring(err), 6, true)
         elseif onlyStep then
             setStatus("Ran one step of \"" .. a.name .. "\"")
+        elseif stopped then
+            setStatus(("Stopped by a Stop step in \"%s\""):format(a.name))
+            notify("Automation", "\"" .. a.name .. "\" reached a Stop step", 3, true)
         else
             setStatus(("Finished \"%s\" (%d loop%s)"):format(a.name, loops, loops == 1 and "" or "s"))
             notify("Automation", "Finished \"" .. a.name .. "\"", 3, true)
@@ -1343,6 +1515,9 @@ local function openEditor(title, initial, onSave)
     titleLabel.TextSize = 15
     titleLabel.TextColor3 = Color3.new(1, 1, 1)
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.TextScaled = true -- long titles (with helper hints) shrink to fit
+    local sizeLimit = Instance.new("UITextSizeConstraint", titleLabel)
+    sizeLimit.MaxTextSize = 15
     titleLabel.Text = title
     titleLabel.Parent = frame
 
@@ -1469,10 +1644,19 @@ local function buildStep(stepType, value, existing, done)
                 return notify("Automation", "Timeout must be a number of seconds.", 3, true)
             end
             step.value = value ~= "" and value or (existing and existing.value) or "30"
+        elseif stepType == "If condition, go to label" then
+            step.value = value ~= "" and value or (existing and existing.value) or ""
+            if step.value == "" then
+                return notify("Automation", "Type the label to jump to in the Value field.", 3, true)
+            end
         end
-        local title = stepType == "Wait until"
-            and "Wait until: condition (e.g. workspace.Boss.Humanoid.Health <= 0)"
-            or "Run code / Fire event: paste your code"
+        local helpersHint = "  |  helpers: stat(\"Coins\"), health(), dist(x,y,z), hasTool(\"Sword\"), find(\"Boss\")"
+        local title = "Run code / Fire event: paste your code"
+        if stepType == "Wait until" then
+            title = "Wait until: condition, e.g. stat(\"Coins\") >= 100" .. helpersHint
+        elseif stepType == "If condition, go to label" then
+            title = "If: condition, e.g. health() < 30" .. helpersHint
+        end
         return openEditor(title, existing and existing.code or "", function(code)
             if trim(code) == "" then return notify("Automation", "Code was empty, step not saved.", 3, true) end
             step.code = code
@@ -1487,6 +1671,12 @@ local function buildStep(stepType, value, existing, done)
             return notify("Automation", "Unknown key. Examples: E, F, Space, One, LeftShift", 4, true)
         end
         value = name
+    elseif stepType == "Label" or stepType == "Go to label" then
+        if value == "" then return notify("Automation", "Type a label name in the Value field.", 3, true) end
+    elseif stepType == "Repeat from label" then
+        if not parseRepeat(value) then
+            return notify("Automation", "Use \"label, times\", e.g. farm, 5", 3, true)
+        end
     end
     step.value = value
     done(step)
