@@ -2499,10 +2499,19 @@ end
 ----------------------------------------------------------------------
 local Defaults = {}
 local unload -- defined below
+local autoSaveStatus -- paragraph in Settings > Hub
+local activeConfig   -- config that auto-save writes to (last loaded/saved, or autoload)
+local autoSaving = false
 
 do
     local H = Tabs.Settings:AddSection("Hub")
     H:AddToggle("ShowNotifications", { Title = "Show notifications", Description = "Toggle on/off messages (errors always show)", Default = true })
+    H:AddToggle("AutoSave", {
+        Title = "Auto-save settings",
+        Description = "Saves every change to your active config about a second after you make it",
+        Default = true,
+    })
+    autoSaveStatus = H:AddParagraph({ Title = "Auto-save", Content = "Starting..." })
     H:AddButton({
         Title = "Reset all settings",
         Description = "Sets every toggle, slider and keybind back to default (waypoints and scripts are kept)",
@@ -2588,6 +2597,15 @@ do
         silent = true
         local results = table.pack(originalLoad(self, ...))
         silent = wasSilent
+        if results[1] then activeConfig = (...) end -- auto-save now writes to the loaded config
+        return table.unpack(results, 1, results.n)
+    end
+
+    -- A manual save / create / overwrite makes that config the auto-save target
+    local originalSave = SaveManager.Save
+    SaveManager.Save = function(self, name, ...)
+        local results = table.pack(originalSave(self, name, ...))
+        if results[1] and not autoSaving then activeConfig = name end
         return table.unpack(results, 1, results.n)
     end
 end
@@ -2761,6 +2779,90 @@ end
 Window:SelectTab(1)
 SaveManager:LoadAutoloadConfig()
 silent = false
+
+----------------------------------------------------------------------
+-- Auto-save: every second, compare all saved settings with the last save.
+-- Once a change has stayed the same for a second, write it to the active
+-- config. With no config yet, creates "autosave" and makes it the autoload.
+----------------------------------------------------------------------
+do
+    local autoloadPath = SaveManager.Folder .. "/settings/autoload.txt"
+
+    local function readAutoload()
+        if not hasFS then return nil end
+        local ok, exists = pcall(isfile, autoloadPath)
+        if not ok or not exists then return nil end
+        local okRead, name = pcall(readfile, autoloadPath)
+        name = okRead and trim(name) or ""
+        return name ~= "" and name or nil
+    end
+
+    local function setStatus(text)
+        pcall(function() autoSaveStatus:SetDesc(text) end)
+    end
+
+    -- One line per saved option, so any change produces a different string
+    local function snapshotSettings()
+        local lines = {}
+        for idx, opt in pairs(Options) do
+            if not SaveManager.Ignore[idx] then
+                local v = opt.Value
+                if opt.Type == "Keybind" then
+                    v = tostring(v) .. "/" .. tostring(opt.Mode)
+                elseif opt.Type == "Colorpicker" then
+                    v = (typeof(v) == "Color3" and v:ToHex() or tostring(v)) .. "/" .. tostring(opt.Transparency)
+                elseif type(v) == "table" then
+                    local keys = {}
+                    for k, on in pairs(v) do if on then table.insert(keys, tostring(k)) end end
+                    table.sort(keys)
+                    v = table.concat(keys, ",")
+                end
+                table.insert(lines, idx .. "=" .. tostring(v))
+            end
+        end
+        table.sort(lines)
+        return table.concat(lines, "\n")
+    end
+
+    activeConfig = activeConfig or readAutoload()
+    if not hasFS then
+        setStatus("Your executor has no file functions, so settings can't be saved.")
+    elseif activeConfig then
+        setStatus(("Changes save to config \"%s\" automatically."):format(activeConfig))
+    else
+        setStatus("Your first change creates config \"autosave\" (and loads it automatically next time).")
+    end
+
+    local lastSaved = snapshotSettings()
+    local lastSeen = lastSaved
+    task.spawn(function()
+        while not unloaded and not Library.Unloaded do
+            task.wait(1)
+            if hasFS and Options.AutoSave and Options.AutoSave.Value then
+                local snap = snapshotSettings()
+                -- save only once the change has settled (e.g. not mid-slider-drag)
+                if snap ~= lastSaved and snap == lastSeen then
+                    local firstConfig = not activeConfig
+                    activeConfig = activeConfig or "autosave"
+                    autoSaving = true
+                    local ok, err = SaveManager:Save(activeConfig)
+                    autoSaving = false
+                    if ok then
+                        lastSaved = snap
+                        if firstConfig then
+                            pcall(writefile, autoloadPath, activeConfig)
+                            pcall(function() Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList()) end)
+                        end
+                        setStatus(("Changes save to config \"%s\" automatically.\nLast saved %s"):format(activeConfig, os.date("%H:%M:%S")))
+                    else
+                        setStatus("Auto-save failed: " .. tostring(err))
+                    end
+                end
+                lastSeen = snap
+            end
+        end
+    end)
+end
 
 if not hasFS then
     notify("Universal Hub", "Your executor has no file functions: waypoints, scripts and configs won't be saved.", 8, true)
