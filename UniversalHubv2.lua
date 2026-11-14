@@ -495,6 +495,12 @@ do
         Title = "Reset to default",
         Callback = function() Options.Gravity:SetValue(196.2) end,
     })
+
+    local SP = Tabs.Movement:AddSection("Spinbot")
+    SP:AddToggle("SpinBot", { Title = "Spinbot", Description = "Spins your character in place", Default = false })
+    SP:AddKeybind("SpinBotKey", { Title = "Keybind", Mode = "Toggle", Default = "X" })
+    SP:AddSlider("SpinSpeed", { Title = "Speed", Default = 720, Min = 30, Max = 5000, Increment = 10, Suffix = " deg/s" })
+    SP:AddDropdown("SpinDirection", { Title = "Direction", Values = { "Right", "Left" }, Default = "Right" })
 end
 
 ----------------------------------------------------------------------
@@ -1145,6 +1151,11 @@ local function applyState(off)
         local usePower = hum and hum.UseJumpPower
         hold("JumpPower", jumpOn and usePower, hum, "JumpPower", math.sqrt(2 * workspace.Gravity * height))
         hold("JumpHeight", jumpOn and not usePower, hum, "JumpHeight", height)
+    end
+
+    -- Spinbot: stop the Humanoid turning you toward where you walk (restored when off)
+    if hum or off then
+        hold("AutoRotate", on("SpinBot"), hum, "AutoRotate", false)
     end
 
     -- Gravity
@@ -2943,6 +2954,7 @@ local ToggleLabels = {
     Fly = "Fly", LegacyFly = "Legacy Fly", Noclip = "Noclip", GravityEnabled = "Gravity", ClickTP = "Click Teleport",
     TweenNoclip = "Tween Noclip", Fullbright = "Fullbright", NoFog = "No Fog", FOVEnabled = "Custom FOV",
     InfiniteZoom = "Infinite Zoom", ESP = "ESP", AntiAFK = "Anti-AFK", FPSUnlock = "FPS Unlock",
+    SpinBot = "Spinbot",
 }
 
 local function applyFPS()
@@ -2975,6 +2987,7 @@ local KeybindTargets = {
     NoclipKey = "Noclip",
     FullbrightKey = "Fullbright",
     ESPKey = "ESP",
+    SpinBotKey = "SpinBot",
 }
 for keyIdx, toggleIdx in pairs(KeybindTargets) do
     Options[keyIdx]:OnClick(function()
@@ -3035,12 +3048,31 @@ connect(RunService.Stepped, function()
     updateNoclip(false)
 end)
 
+-- Spinbot keeps its own angle and sets the yaw directly, so it also works
+-- while flying (fly re-aims the character every frame)
+local spinAngle
 connect(RunService.RenderStepped, function(dt)
     if Options.Fly.Value then
         updateFly(dt)
     elseif Fly.active then
         stopFly()
     end
+
+    if Options.SpinBot.Value then
+        local hrp = getHRP()
+        if hrp then
+            if not spinAngle then
+                local look = hrp.CFrame.LookVector
+                spinAngle = math.atan2(-look.X, -look.Z)
+            end
+            local direction = Options.SpinDirection.Value == "Left" and 1 or -1
+            spinAngle = (spinAngle + direction * math.rad(Options.SpinSpeed.Value) * math.min(dt, 0.1)) % (2 * math.pi)
+            hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, spinAngle, 0)
+        end
+    else
+        spinAngle = nil
+    end
+
     updateTracers()
 end)
 
