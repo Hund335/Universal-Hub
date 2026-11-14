@@ -602,6 +602,8 @@ do
     E:AddToggle("ESPDistance", { Title = "Show distance", Default = true })
     E:AddToggle("ESPTeamCheck", { Title = "Hide teammates", Default = false })
     E:AddToggle("ESPTeamColor", { Title = "Use team colors", Default = false })
+    E:AddToggle("ESPVisibleCheck", { Title = "Color players in sight", Description = "Uses the color below when nothing blocks your view of them", Default = true })
+    E:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
     E:AddColorpicker("ESPColor", { Title = "ESP color", Default = Color3.fromRGB(255, 70, 70) })
     E:AddSlider("ESPMaxDistance", { Title = "Max distance", Default = 2000, Min = 50, Max = 10000, Increment = 50, Suffix = " studs" })
 
@@ -1094,6 +1096,33 @@ local function getESP(p)
     return e
 end
 
+-- True when a ray from the camera reaches the character without hitting a wall.
+-- See-through parts (glass, invisible barriers) don't count as walls.
+local sightParams = RaycastParams.new()
+sightParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function isInSight(char)
+    local cam = workspace.CurrentCamera
+    if not cam then return false end
+    local origin = cam.CFrame.Position
+    local ignore = { char }
+    if LP.Character then table.insert(ignore, LP.Character) end
+    for _, partName in ipairs({ "Head", "HumanoidRootPart" }) do
+        local part = char:FindFirstChild(partName)
+        if part then
+            local direction = part.Position - origin
+            for _ = 1, 4 do
+                sightParams.FilterDescendantsInstances = ignore
+                local hit = workspace:Raycast(origin, direction, sightParams)
+                if not hit then return true end
+                if hit.Instance.Transparency < 0.8 then break end
+                table.insert(ignore, hit.Instance) -- see-through: look past it
+            end
+        end
+    end
+    return false
+end
+
 local function updateESP()
     local enabled = Options.ESP.Value
     if not enabled then
@@ -1113,6 +1142,9 @@ local function updateESP()
             if show then
                 local e = getESP(p)
                 local color = (Options.ESPTeamColor.Value and p.Team) and p.TeamColor.Color or Options.ESPColor.Value
+                if Options.ESPVisibleCheck.Value and isInSight(char) then
+                    color = Options.ESPVisibleColor.Value
+                end
                 if e.hl.Adornee ~= char then e.hl.Adornee = char end
                 local head = char:FindFirstChild("Head") or hrp
                 if e.bb.Adornee ~= head then e.bb.Adornee = head end
