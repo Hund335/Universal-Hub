@@ -705,7 +705,7 @@ end
 -- Re-run the hub after any teleport (server hop, rejoin, game teleports) so
 -- auto-start automations keep going in the new server
 local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-local LOAD_LINE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Universal-Hub/refs/heads/main/UniversalHub.lua"))()'
+local LOAD_LINE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Universal-Hub/main/loader.lua"))()'
 local teleportQueued = false
 local function queueHubReload()
     if teleportQueued or not queueTeleport or not (Options.KeepAfterTeleport and Options.KeepAfterTeleport.Value) then return end
@@ -2247,7 +2247,9 @@ end)
 -- GameId covers every place of a game (lobby, matches, ...).
 ----------------------------------------------------------------------
 local GameModule = { cleanups = {} }
-local GAME_REPO = "https://raw.githubusercontent.com/Hund335/Universal-Hub/refs/heads/main/games/"
+-- Use the exact commit the loader resolved (branch URLs can be stale for minutes)
+local GAME_REPO = "https://raw.githubusercontent.com/Hund335/Universal-Hub/"
+    .. tostring(getgenv and getgenv().UniversalHub_Ref or "main") .. "/games/"
 
 local GAME_TEMPLATE = [==[
 --[[
