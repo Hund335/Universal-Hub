@@ -870,6 +870,14 @@ do
     EC:AddToggle("ESPVisibleCheck", { Title = "Different color when in sight", Description = "When nothing blocks your view of them", Default = true })
     EC:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
     EC:AddToggle("ESPTeamColor", { Title = "Use team colors", Default = false })
+    EC:AddToggle("ESPRainbow", { Title = "Rainbow mode", Description = "Cycles through all colors", Default = false })
+    EC:AddSlider("ESPRainbowSpeed", { Title = "Rainbow speed", Default = 0.5, Min = 0.1, Max = 3, Increment = 0.1 })
+    EC:AddToggle("ESPTeamMode", {
+        Title = "Team mode",
+        Description = "Shows your teammates in the color below (wins over every other color)",
+        Default = false,
+    })
+    EC:AddColorpicker("ESPTeammateColor", { Title = "Teammate color", Default = Color3.fromRGB(40, 120, 255) })
 
     local T = Tabs.Visuals:AddSection("Tracers")
     local hasDrawing = typeof(Drawing) == "table" and typeof(Drawing.new) == "function"
@@ -1411,6 +1419,11 @@ local function isInSight(char)
     return false
 end
 
+-- Hue cycles over time; Rainbow speed = full cycles per second
+local function rainbowColor()
+    return Color3.fromHSV((os.clock() * Options.ESPRainbowSpeed.Value) % 1, 1, 1)
+end
+
 local function updateESP()
     local enabled = Options.ESP.Value
     if not enabled then
@@ -1424,15 +1437,21 @@ local function updateESP()
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local dist = (hrp and myHRP) and (hrp.Position - myHRP.Position).Magnitude or 0
-            local teammate = Options.ESPTeamCheck.Value and p.Team ~= nil and p.Team == LP.Team
-            local show = hrp and hum and hum.Health > 0 and dist <= Options.ESPMaxDistance.Value and not teammate
+            local isTeammate = p.Team ~= nil and p.Team == LP.Team
+            local hidden = Options.ESPTeamCheck.Value and isTeammate
+            local show = hrp and hum and hum.Health > 0 and dist <= Options.ESPMaxDistance.Value and not hidden
 
             if show then
                 local e = getESP(p)
+                -- Color priority (lowest to highest): base / team colors, in sight, rainbow, team mode
                 local color = (Options.ESPTeamColor.Value and p.Team) and p.TeamColor.Color or Options.ESPColor.Value
                 if Options.ESPVisibleCheck.Value and isInSight(char) then
                     color = Options.ESPVisibleColor.Value
                 end
+                local teamMode = Options.ESPTeamMode.Value and isTeammate
+                e.rainbow = Options.ESPRainbow.Value and not teamMode
+                if e.rainbow then color = rainbowColor() end
+                if teamMode then color = Options.ESPTeammateColor.Value end
                 if e.hl.Adornee ~= char then e.hl.Adornee = char end
                 local head = char:FindFirstChild("Head") or hrp
                 if e.bb.Adornee ~= head then e.bb.Adornee = head end
@@ -1451,6 +1470,20 @@ local function updateESP()
                 ESP[p].bb.Enabled = false
                 ESP[p].shown = false
             end
+        end
+    end
+end
+
+-- Rainbow players are recolored every frame so the colors flow smoothly
+-- (the rest of the ESP only refreshes 10x per second)
+local function updateRainbow()
+    if not (Options.ESP.Value and Options.ESPRainbow.Value) then return end
+    local color = rainbowColor()
+    for _, e in pairs(ESP) do
+        if e.shown and e.rainbow then
+            e.color = color
+            e.hl.FillColor, e.hl.OutlineColor = color, color
+            e.label.TextColor3 = color
         end
     end
 end
@@ -3073,6 +3106,7 @@ connect(RunService.RenderStepped, function(dt)
         spinAngle = nil
     end
 
+    updateRainbow()
     updateTracers()
 end)
 
