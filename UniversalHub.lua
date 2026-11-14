@@ -183,49 +183,45 @@ local Tabs = {
 -- Movement tab
 ----------------------------------------------------------------------
 do
-    local S = Tabs.Movement:AddSection("Speed & Jump")
-    S:AddToggle("WalkSpeedEnabled", { Title = "WalkSpeed", Description = "Re-applied on respawn and if the game resets it", Default = false })
+    local S = Tabs.Movement:AddSection("Speed")
+    S:AddToggle("WalkSpeedEnabled", { Title = "Walk speed", Description = "Stays applied after respawning", Default = false })
+    S:AddKeybind("WalkSpeedKey", { Title = "Keybind", Mode = "Toggle", Default = "V" })
     S:AddSlider("WalkSpeed", { Title = "Speed", Default = 16, Min = 0, Max = 500, Increment = 1 })
-    S:AddKeybind("WalkSpeedKey", { Title = "WalkSpeed keybind", Mode = "Toggle", Default = "V" })
 
-    S:AddToggle("JumpEnabled", { Title = "Jump Height", Default = false })
-    S:AddSlider("JumpHeight", { Title = "Height", Default = 7.2, Min = 0, Max = 200, Increment = 0.1, Suffix = " studs" })
-
-    S:AddToggle("InfiniteJump", { Title = "Infinite Jump", Description = "Jump again while in the air", Default = false })
-    S:AddKeybind("InfiniteJumpKey", { Title = "Infinite Jump keybind", Mode = "Toggle", Default = "J" })
+    local J = Tabs.Movement:AddSection("Jump")
+    J:AddToggle("JumpEnabled", { Title = "Jump height", Default = false })
+    J:AddSlider("JumpHeight", { Title = "Height", Default = 7.2, Min = 0, Max = 200, Increment = 0.1, Suffix = " studs" })
+    J:AddToggle("InfiniteJump", { Title = "Infinite jump", Description = "Jump again while in the air", Default = false })
+    J:AddKeybind("InfiniteJumpKey", { Title = "Keybind", Mode = "Toggle", Default = "J" })
 
     local F = Tabs.Movement:AddSection("Fly")
-    F:AddParagraph({ Title = "Controls", Content = "WASD to move (follows camera), Space = up, LeftControl = down." })
-    F:AddToggle("Fly", { Title = "Fly", Default = false })
+    F:AddToggle("Fly", { Title = "Fly", Description = "WASD follows the camera, Space = up, LeftControl = down", Default = false })
+    F:AddKeybind("FlyKey", { Title = "Keybind", Mode = "Toggle", Default = "G" })
+    F:AddSlider("FlySpeed", { Title = "Speed", Default = 50, Min = 1, Max = 500, Increment = 1 })
     F:AddDropdown("FlyMode", {
-        Title = "Fly Mode",
-        Description = "If you hover but can't move in a game, switch to Velocity",
+        Title = "Mode",
+        Description = "Hovering but can't move? Switch to Velocity",
         Values = { "CFrame", "Velocity" },
         Default = "CFrame",
     })
     F:AddToggle("LegacyFly", {
-        Title = "Legacy Fly",
-        Description = "Original fly (BodyVelocity + BodyGyro). Overrides Fly Mode while on",
+        Title = "Legacy fly",
+        Description = "The original BodyVelocity fly. Overrides Mode while on",
         Default = false,
     })
-    F:AddSlider("FlySpeed", { Title = "Fly Speed", Default = 50, Min = 1, Max = 500, Increment = 1 })
-    F:AddKeybind("FlyKey", { Title = "Fly keybind", Mode = "Toggle", Default = "G" })
 
-    local N = Tabs.Movement:AddSection("Noclip")
+    local N = Tabs.Movement:AddSection("Noclip & Click Teleport")
     N:AddToggle("Noclip", { Title = "Noclip", Description = "Walk through walls", Default = false })
-    N:AddKeybind("NoclipKey", { Title = "Noclip keybind", Mode = "Toggle", Default = "N" })
+    N:AddKeybind("NoclipKey", { Title = "Keybind", Mode = "Toggle", Default = "N" })
+    N:AddToggle("ClickTP", { Title = "Click teleport", Description = "Hold LeftControl and click. Uses the Teleport tab's mode", Default = false })
 
     local G = Tabs.Movement:AddSection("Gravity")
-    G:AddToggle("GravityEnabled", { Title = "Custom Gravity", Default = false })
-    G:AddSlider("Gravity", { Title = "Gravity", Description = "Roblox default is 196.2", Default = 196.2, Min = 0, Max = 500, Increment = 0.1 })
+    G:AddToggle("GravityEnabled", { Title = "Custom gravity", Default = false })
+    G:AddSlider("Gravity", { Title = "Gravity", Description = "Roblox default: 196.2", Default = 196.2, Min = 0, Max = 500, Increment = 0.1 })
     G:AddButton({
-        Title = "Reset gravity slider",
-        Description = "Sets the slider back to 196.2",
+        Title = "Reset to default",
         Callback = function() Options.Gravity:SetValue(196.2) end,
     })
-
-    local C = Tabs.Movement:AddSection("Click Teleport")
-    C:AddToggle("ClickTP", { Title = "Click Teleport", Description = "Hold LeftControl and click to teleport (uses the Teleport mode)", Default = false })
 end
 
 ----------------------------------------------------------------------
@@ -235,13 +231,13 @@ local Waypoints = loadJSON("waypoints.json", {})
 local WaypointListSection
 
 do
-    local S = Tabs.Teleport:AddSection("Teleport Settings")
-    S:AddDropdown("TPMode", { Title = "Teleport Mode", Description = "Used by waypoints, players and click TP", Values = { "Instant", "Tween" }, Default = "Instant" })
-    S:AddSlider("TweenSpeed", { Title = "Tween Speed", Default = 100, Min = 10, Max = 1000, Increment = 5, Suffix = " st/s" })
+    local S = Tabs.Teleport:AddSection("Teleport Mode")
+    S:AddDropdown("TPMode", { Title = "Mode", Description = "Used by waypoints, players, click teleport and automations", Values = { "Instant", "Tween" }, Default = "Instant" })
+    S:AddSlider("TweenSpeed", { Title = "Tween speed", Default = 100, Min = 10, Max = 1000, Increment = 5, Suffix = " st/s" })
     S:AddToggle("TweenNoclip", { Title = "Noclip while tweening", Description = "Avoids getting stuck on walls", Default = true })
     S:AddButton({ Title = "Cancel tween", Callback = function() cancelTween() notify("Teleport", "Tween cancelled.") end })
 
-    local P = Tabs.Teleport:AddSection("Players")
+    local P = Tabs.Teleport:AddSection("Player")
     P:AddDropdown("TPPlayer", { Title = "Player", Values = {}, Default = nil })
     P:AddButton({
         Title = "Teleport to player",
@@ -257,6 +253,9 @@ do
             notify("Teleport", "Teleporting to " .. name)
         end,
     })
+
+    -- The clickable list comes first; create / manage sections are added below it
+    WaypointListSection = Tabs.Teleport:AddSection("Waypoints (click to teleport)")
 end
 
 ----------------------------------------------------------------------
@@ -371,14 +370,13 @@ local function addWaypoint()
 end
 
 do
-    local W = Tabs.Teleport:AddSection("Create Waypoint")
-    W:AddParagraph({ Title = "This game", Content = "PlaceId: " .. game.PlaceId .. "\nWaypoints only show up in the game they were saved in." })
+    local W = Tabs.Teleport:AddSection("New Waypoint")
     W:AddInput("WaypointName", { Title = "Name", Default = "", Placeholder = "e.g. Shop, Boss, Spawn" })
     W:AddInput("WaypointCoords", { Title = "Coordinates (optional)", Default = "", Placeholder = "x, y, z | PlaceId  (empty = current spot)" })
-    W:AddButton({ Title = "Save waypoint", Description = "Uses your position, or the coordinates field", Callback = addWaypoint })
+    W:AddButton({ Title = "Save waypoint", Description = "Only shows up in this game (PlaceId " .. game.PlaceId .. ")", Callback = addWaypoint })
     W:AddButton({
-        Title = "Copy current coordinates",
-        Description = "Format: x, y, z | PlaceId (paste it into the coordinates field later)",
+        Title = "Copy my coordinates",
+        Description = "Paste them into Coordinates later to recreate this spot",
         Callback = function()
             local hrp = getHRP()
             if not hrp then return notify("Waypoint", "No character found.", 3, true) end
@@ -434,8 +432,6 @@ do
             })
         end,
     })
-
-    WaypointListSection = Tabs.Teleport:AddSection("Waypoints in this game (click to teleport)")
 end
 
 ----------------------------------------------------------------------
@@ -523,13 +519,12 @@ local function addScript(runAfter)
 end
 
 do
-    local A = Tabs.Scripts:AddSection("Add Script")
-    A:AddParagraph({
-        Title = "How it works",
-        Content = "Paste either a raw URL (https://...) or full code like loadstring(game:HttpGet(\"...\"))(). Each saved script becomes a button below.",
-    })
+    -- The clickable list comes first; add / manage sections are below it
+    ScriptListSection = Tabs.Scripts:AddSection("Your Scripts (click to run)")
+
+    local A = Tabs.Scripts:AddSection("New Script")
     A:AddInput("ScriptName", { Title = "Name", Default = "", Placeholder = "e.g. Infinite Yield" })
-    A:AddInput("ScriptSource", { Title = "URL or code", Default = "", Placeholder = "https://... or loadstring(...)()" })
+    A:AddInput("ScriptSource", { Title = "URL or code", Description = "A raw URL, or code like loadstring(game:HttpGet(\"...\"))()", Default = "", Placeholder = "https://... or loadstring(...)()" })
     A:AddButton({ Title = "Add script", Callback = function() addScript(false) end })
     A:AddButton({ Title = "Add & run", Callback = function() addScript(true) end })
 
@@ -576,8 +571,6 @@ do
             })
         end,
     })
-
-    ScriptListSection = Tabs.Scripts:AddSection("Your Scripts (click to run)")
 end
 
 ----------------------------------------------------------------------
@@ -585,43 +578,45 @@ end
 ----------------------------------------------------------------------
 local canFPS = typeof(setfpscap) == "function"
 do
-    local L = Tabs.Visuals:AddSection("Lighting")
-    L:AddToggle("Fullbright", { Title = "Fullbright", Description = "Removes darkness and shadows", Default = false })
-    L:AddKeybind("FullbrightKey", { Title = "Fullbright keybind", Mode = "Toggle", Default = "L" })
-    L:AddToggle("NoFog", { Title = "No Fog", Default = false })
-
-    local C = Tabs.Visuals:AddSection("Camera")
-    C:AddToggle("FOVEnabled", { Title = "Custom FOV", Default = false })
-    C:AddSlider("FOV", { Title = "Field of View", Default = 70, Min = 30, Max = 120, Increment = 1 })
-    C:AddToggle("InfiniteZoom", { Title = "Infinite Zoom Out", Description = "Removes the max zoom distance and first-person lock", Default = false })
-
     local E = Tabs.Visuals:AddSection("ESP")
     E:AddToggle("ESP", { Title = "Player ESP", Description = "Highlights players through walls", Default = false })
-    E:AddKeybind("ESPKey", { Title = "ESP keybind", Mode = "Toggle", Default = "K" })
+    E:AddKeybind("ESPKey", { Title = "Keybind", Mode = "Toggle", Default = "K" })
     E:AddToggle("ESPNames", { Title = "Show names", Default = true })
     E:AddToggle("ESPDistance", { Title = "Show distance", Default = true })
     E:AddToggle("ESPTeamCheck", { Title = "Hide teammates", Default = false })
-    E:AddToggle("ESPTeamColor", { Title = "Use team colors", Default = false })
-    E:AddToggle("ESPVisibleCheck", { Title = "Color players in sight", Description = "Uses the color below when nothing blocks your view of them", Default = true })
-    E:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
-    E:AddColorpicker("ESPColor", { Title = "ESP color", Default = Color3.fromRGB(255, 70, 70) })
     E:AddSlider("ESPMaxDistance", { Title = "Max distance", Default = 2000, Min = 50, Max = 10000, Increment = 50, Suffix = " studs" })
+
+    local EC = Tabs.Visuals:AddSection("ESP Colors")
+    EC:AddColorpicker("ESPColor", { Title = "Color", Default = Color3.fromRGB(255, 70, 70) })
+    EC:AddToggle("ESPVisibleCheck", { Title = "Different color when in sight", Description = "When nothing blocks your view of them", Default = true })
+    EC:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
+    EC:AddToggle("ESPTeamColor", { Title = "Use team colors", Default = false })
+
+    local T = Tabs.Visuals:AddSection("Tracers")
     local hasDrawing = typeof(Drawing) == "table" and typeof(Drawing.new) == "function"
-    E:AddToggle("ESPTracers", {
+    T:AddToggle("ESPTracers", {
         Title = "Tracers",
-        Description = hasDrawing and "Draws a line to each player in their ESP color"
+        Description = hasDrawing and "A line to each player in their ESP color (needs Player ESP on)"
             or "Not supported by your executor (no Drawing library)",
         Default = false,
     })
-    E:AddDropdown("ESPTracerOrigin", { Title = "Tracer start", Values = { "Bottom", "Center", "Mouse", "Top" }, Default = "Bottom" })
-    E:AddSlider("ESPTracerThickness", { Title = "Tracer thickness", Default = 1.5, Min = 1, Max = 5, Increment = 0.5 })
+    T:AddDropdown("ESPTracerOrigin", { Title = "Start from", Values = { "Bottom", "Center", "Mouse", "Top" }, Default = "Bottom" })
+    T:AddSlider("ESPTracerThickness", { Title = "Thickness", Default = 1.5, Min = 1, Max = 5, Increment = 0.5 })
 
-    local P = Tabs.Visuals:AddSection("Performance")
+    local L = Tabs.Visuals:AddSection("World")
+    L:AddToggle("Fullbright", { Title = "Fullbright", Description = "Removes darkness and shadows", Default = false })
+    L:AddKeybind("FullbrightKey", { Title = "Keybind", Mode = "Toggle", Default = "L" })
+    L:AddToggle("NoFog", { Title = "No fog", Default = false })
+
+    local C = Tabs.Visuals:AddSection("Camera")
+    C:AddToggle("FOVEnabled", { Title = "Custom FOV", Default = false })
+    C:AddSlider("FOV", { Title = "Field of view", Default = 70, Min = 30, Max = 120, Increment = 1 })
+    C:AddToggle("InfiniteZoom", { Title = "Infinite zoom out", Description = "Also removes forced first person", Default = false })
     if canFPS then
-        P:AddToggle("FPSUnlock", { Title = "FPS Unlock", Default = false })
-        P:AddSlider("FPSCap", { Title = "FPS cap", Default = 240, Min = 30, Max = 1000, Increment = 10 })
+        C:AddToggle("FPSUnlock", { Title = "FPS unlock", Default = false })
+        C:AddSlider("FPSCap", { Title = "FPS cap", Default = 240, Min = 30, Max = 1000, Increment = 10 })
     else
-        P:AddParagraph({ Title = "FPS Unlock", Content = "Not supported by your executor (no setfpscap)." })
+        C:AddParagraph({ Title = "FPS unlock", Content = "Not supported by your executor (no setfpscap)." })
     end
 end
 
@@ -765,55 +760,54 @@ local function serverHop(reason)
 end
 
 do
-    local M = Tabs.Misc:AddSection("Session")
-    M:AddToggle("AntiAFK", { Title = "Anti-AFK", Description = "Prevents the 20 minute idle kick", Default = true })
-
     local S = Tabs.Misc:AddSection("Server")
-    S:AddToggle("KeepAfterTeleport", {
-        Title = "Re-run hub after teleport",
-        Description = queueTeleport and "Reloads the hub in the new server (needed for automations to continue after a hop)"
-            or "Not supported by your executor (no queue_on_teleport)",
-        Default = true,
-    })
-    S:AddToggle("HopSmallest", { Title = "Hop to smallest servers", Description = "Off = random server with space", Default = false })
-    S:AddButton({ Title = "Rejoin", Description = "Rejoins this server", Callback = rejoin })
+    S:AddButton({ Title = "Rejoin", Callback = rejoin })
     S:AddButton({
         Title = "Server hop",
         Description = "Joins a different public server of this game",
         Callback = function() task.spawn(serverHop) end,
     })
+    S:AddToggle("HopSmallest", { Title = "Hop to smallest servers", Description = "Off = any server with space", Default = false })
+    S:AddToggle("KeepAfterTeleport", {
+        Title = "Re-run hub after teleport",
+        Description = queueTeleport and "Lets automations continue after a hop"
+            or "Not supported by your executor (no queue_on_teleport)",
+        Default = true,
+    })
+    S:AddToggle("AntiAFK", { Title = "Anti-AFK", Description = "Prevents the 20 minute idle kick", Default = true })
     S:AddButton({ Title = "Copy PlaceId", Callback = function() copy(tostring(game.PlaceId)) end })
     S:AddButton({ Title = "Copy JobId", Callback = function() copy(game.JobId) end })
 
     local W = Tabs.Misc:AddSection("Discord Webhook")
-    W:AddParagraph({
-        Title = "Placeholders",
-        Content = "Use these in messages: {player} {displayname} {game} {placeid} {jobid} {players} {time} {health} {stat:Coins}. Automation messages also get {automation} and {loop}.",
-    })
     W:AddInput("WebhookURL", { Title = "Webhook URL", Default = "", Placeholder = "https://discord.com/api/webhooks/..." })
-    W:AddInput("WebhookPing", { Title = "Ping user ID (optional)", Default = "", Placeholder = "Your Discord user ID, e.g. 123456789012345678", Numeric = true })
-    W:AddToggle("WebhookShowPlayer", { Title = "Include player name", Default = true })
-    W:AddDropdown("WebhookEvents", {
-        Title = "Send on",
-        Description = "Events that send a message automatically",
-        Values = WEBHOOK_EVENTS,
-        Multi = true,
-        Default = { "Automation finished", "Automation error", "Safety stop" },
-    })
-    W:AddInput("WebhookMessage", { Title = "Custom message", Default = "{player} is in {game}", Placeholder = "Text for the Send button" })
-    W:AddButton({
-        Title = "Send custom message",
-        Callback = function()
-            sendWebhook("Message", fillPlaceholders(Options.WebhookMessage.Value), nil, function(ok, info)
-                notify("Webhook", ok and "Sent!" or ("Failed: " .. info), 4, true)
-            end)
-        end,
-    })
     W:AddButton({
         Title = "Test webhook",
         Callback = function()
             sendWebhook("Test", "Universal Hub webhook works.", 0x3BA55D, function(ok, info)
                 notify("Webhook", ok and "Test sent, check Discord." or ("Failed: " .. info), 4, true)
+            end)
+        end,
+    })
+    W:AddDropdown("WebhookEvents", {
+        Title = "Send on",
+        Description = "Events that post automatically",
+        Values = WEBHOOK_EVENTS,
+        Multi = true,
+        Default = { "Automation finished", "Automation error", "Safety stop" },
+    })
+    W:AddInput("WebhookPing", { Title = "Ping user ID (optional)", Default = "", Placeholder = "Your Discord user ID, e.g. 123456789012345678", Numeric = true })
+    W:AddToggle("WebhookShowPlayer", { Title = "Include player name", Default = true })
+    W:AddInput("WebhookMessage", {
+        Title = "Custom message",
+        Description = "Placeholders: {player} {displayname} {game} {placeid} {jobid} {players} {time} {health} {stat:Coins}",
+        Default = "{player} is in {game}",
+        Placeholder = "Text for the Send button",
+    })
+    W:AddButton({
+        Title = "Send custom message",
+        Callback = function()
+            sendWebhook("Message", fillPlaceholders(Options.WebhookMessage.Value), nil, function(ok, info)
+                notify("Webhook", ok and "Sent!" or ("Failed: " .. info), 4, true)
             end)
         end,
     })
@@ -2083,23 +2077,10 @@ do
     Auto.statusPara = R:AddParagraph({ Title = "Status", Content = "Idle" })
     R:AddButton({ Title = "Run", Description = "Runs the selected automation", Callback = function() runAutomation(currentAuto) end })
     R:AddButton({ Title = "Stop", Callback = function() stopAutomation() end })
-    R:AddKeybind("AutoRunKey", { Title = "Run / Stop keybind", Mode = "Toggle", Default = "P" })
-    R:AddToggle("AutoLoop", { Title = "Loop", Description = "Repeat the steps when they finish", Default = false })
-    R:AddSlider("AutoLoopCount", { Title = "Loop count", Description = "0 = forever", Default = 0, Min = 0, Max = 1000, Increment = 1 })
-    R:AddSlider("AutoStepDelay", { Title = "Delay between steps", Default = 0.2, Min = 0, Max = 10, Increment = 0.1, Suffix = "s" })
-    R:AddToggle("AutoStartOnJoin", { Title = "Auto-start when I join", Description = "Starts this automation when the hub loads in this game (also after a server hop)", Default = false })
+    R:AddKeybind("AutoRunKey", { Title = "Run / stop keybind", Mode = "Toggle", Default = "P" })
 
-    local F = Tabs.Automation:AddSection("Safety (per automation, 0 = off)")
-    F:AddSlider("SafetyRange", { Title = "Stop if a player comes within", Default = 0, Min = 0, Max = 500, Increment = 5, Suffix = " studs" })
-    F:AddToggle("SafetyIgnoreFriends", { Title = "Ignore friends", Default = true })
-    F:AddSlider("SafetyHealth", { Title = "Stop if health drops to", Default = 0, Min = 0, Max = 100, Increment = 1, Suffix = "%" })
-    F:AddSlider("SafetyMinutes", { Title = "Stop after", Default = 0, Min = 0, Max = 600, Increment = 1, Suffix = " min" })
-    F:AddDropdown("SafetyAction", {
-        Title = "When a safety rule triggers",
-        Description = "Server hop + Auto-start keeps farming in a fresh server",
-        Values = SAFETY_ACTIONS,
-        Default = "Stop",
-    })
+    -- Steps list right under Run; adding / editing / options follow below
+    StepListSection = Tabs.Automation:AddSection("Steps (click to select)")
 
     local S = Tabs.Automation:AddSection("Add Step")
     S:AddDropdown("StepType", { Title = "Action", Values = STEP_TYPES, Default = "Teleport" })
@@ -2190,6 +2171,24 @@ do
         end),
     })
 
+    local O = Tabs.Automation:AddSection("Loop & Auto-start")
+    O:AddToggle("AutoLoop", { Title = "Loop", Description = "Repeat the steps when they finish", Default = false })
+    O:AddSlider("AutoLoopCount", { Title = "Loop count", Description = "0 = forever", Default = 0, Min = 0, Max = 1000, Increment = 1 })
+    O:AddSlider("AutoStepDelay", { Title = "Delay between steps", Default = 0.2, Min = 0, Max = 10, Increment = 0.1, Suffix = "s" })
+    O:AddToggle("AutoStartOnJoin", { Title = "Auto-start when I join", Description = "Also after a server hop", Default = false })
+
+    local F = Tabs.Automation:AddSection("Safety (0 = off)")
+    F:AddSlider("SafetyRange", { Title = "Stop if a player comes within", Default = 0, Min = 0, Max = 500, Increment = 5, Suffix = " studs" })
+    F:AddToggle("SafetyIgnoreFriends", { Title = "Ignore friends", Default = true })
+    F:AddSlider("SafetyHealth", { Title = "Stop if health drops to", Default = 0, Min = 0, Max = 100, Increment = 1, Suffix = "%" })
+    F:AddSlider("SafetyMinutes", { Title = "Stop after", Default = 0, Min = 0, Max = 600, Increment = 1, Suffix = " min" })
+    F:AddDropdown("SafetyAction", {
+        Title = "Then",
+        Description = "Server hop + auto-start keeps farming in a fresh server",
+        Values = SAFETY_ACTIONS,
+        Default = "Stop",
+    })
+
     local X = Tabs.Automation:AddSection("Share")
     X:AddButton({
         Title = "Export selected to clipboard",
@@ -2219,8 +2218,6 @@ do
             end)
         end,
     })
-
-    StepListSection = Tabs.Automation:AddSection("Steps (click to select)")
 end
 
 local stepButtons = {}
@@ -2560,10 +2557,10 @@ local autoSaving = false
 
 do
     local H = Tabs.Settings:AddSection("Hub")
-    H:AddToggle("ShowNotifications", { Title = "Show notifications", Description = "Toggle on/off messages (errors always show)", Default = true })
+    H:AddToggle("ShowNotifications", { Title = "Show notifications", Description = "Errors always show", Default = true })
     H:AddToggle("AutoSave", {
         Title = "Auto-save settings",
-        Description = "Saves every change to your active config about a second after you make it",
+        Description = "Saves changes to your active config about a second after you make them",
         Default = true,
     })
     autoSaveStatus = H:AddParagraph({ Title = "Auto-save", Content = "Starting..." })
