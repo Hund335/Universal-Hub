@@ -899,6 +899,9 @@ do
     C:AddToggle("FOVEnabled", { Title = "Custom FOV", Default = false })
     C:AddSlider("FOV", { Title = "Field of view", Default = 70, Min = 30, Max = 120, Increment = 1 })
     C:AddToggle("InfiniteZoom", { Title = "Infinite zoom out", Description = "Also removes forced first person", Default = false })
+    C:AddToggle("Freecam", { Title = "Freecam", Description = "WASD move, E/Q up/down, Shift fast, hold right mouse to look", Default = false })
+    C:AddKeybind("FreecamKey", { Title = "Freecam keybind", Mode = "Toggle", Default = "P" })
+    C:AddSlider("FreecamSpeed", { Title = "Freecam speed", Default = 50, Min = 5, Max = 300, Increment = 5, Suffix = " studs/s" })
     if canFPS then
         C:AddToggle("FPSUnlock", { Title = "FPS unlock", Default = false })
         C:AddSlider("FPSCap", { Title = "FPS cap", Default = 240, Min = 30, Max = 1000, Increment = 10 })
@@ -2980,6 +2983,82 @@ do
 end
 
 ----------------------------------------------------------------------
+-- Freecam: detaches the camera and flies it around on its own. Your
+-- character is anchored in place meanwhile so WASD doesn't walk it.
+----------------------------------------------------------------------
+local Freecam = { active = false }
+local FREECAM_STEP = "UniversalHub_Freecam"
+local FREECAM_KEYS = {
+    { Enum.KeyCode.W, Vector3.new(0, 0, -1) }, { Enum.KeyCode.S, Vector3.new(0, 0, 1) },
+    { Enum.KeyCode.A, Vector3.new(-1, 0, 0) }, { Enum.KeyCode.D, Vector3.new(1, 0, 0) },
+    { Enum.KeyCode.E, Vector3.new(0, 1, 0) },  { Enum.KeyCode.Q, Vector3.new(0, -1, 0) },
+}
+
+local function stopFreecam()
+    if not Freecam.active then return end
+    Freecam.active = false
+    pcall(function() RunService:UnbindFromRenderStep(FREECAM_STEP) end)
+    UIS.MouseBehavior = Enum.MouseBehavior.Default
+    local cam = workspace.CurrentCamera
+    if cam then
+        cam.CameraType = Freecam.camType or Enum.CameraType.Custom
+        local hum = getHum()
+        if hum then cam.CameraSubject = hum end
+    end
+    if Freecam.hrp and Freecam.hrp.Parent then Freecam.hrp.Anchored = Freecam.anchored end
+    Freecam.hrp = nil
+end
+
+local function updateFreecam(dt)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    cam.CameraType = Enum.CameraType.Scriptable
+
+    if UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        UIS.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+        local delta = UIS:GetMouseDelta()
+        Freecam.yaw -= delta.X * 0.0035
+        Freecam.pitch = math.clamp(Freecam.pitch - delta.Y * 0.0035, -1.55, 1.55)
+    else
+        UIS.MouseBehavior = Enum.MouseBehavior.Default
+    end
+
+    local rot = CFrame.Angles(0, Freecam.yaw, 0) * CFrame.Angles(Freecam.pitch, 0, 0)
+    local move = Vector3.zero
+    if not UIS:GetFocusedTextBox() then
+        for _, k in ipairs(FREECAM_KEYS) do
+            if UIS:IsKeyDown(k[1]) then move += k[2] end
+        end
+    end
+    if move.Magnitude > 0 then
+        local speed = Options.FreecamSpeed.Value * (UIS:IsKeyDown(Enum.KeyCode.LeftShift) and 3 or 1)
+        Freecam.pos += rot:VectorToWorldSpace(move.Unit) * speed * math.min(dt, 0.1)
+    end
+    cam.CFrame = CFrame.new(Freecam.pos) * rot
+end
+
+local function startFreecam()
+    if Freecam.active then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    Freecam.active = true
+    Freecam.camType = cam.CameraType
+    local cf = cam.CFrame
+    local look = cf.LookVector
+    Freecam.pos = cf.Position
+    Freecam.yaw = math.atan2(-look.X, -look.Z)
+    Freecam.pitch = math.asin(math.clamp(look.Y, -1, 1))
+
+    local hrp = getHRP()
+    if hrp then
+        Freecam.hrp, Freecam.anchored = hrp, hrp.Anchored
+        hrp.Anchored = true
+    end
+    -- After the default camera scripts, so they can't pull the camera back
+    RunService:BindToRenderStep(FREECAM_STEP, Enum.RenderPriority.Camera.Value + 2, updateFreecam)
+end
+
+----------------------------------------------------------------------
 -- Wiring: notifications, keybinds, events
 ----------------------------------------------------------------------
 local ToggleLabels = {
@@ -2987,7 +3066,7 @@ local ToggleLabels = {
     Fly = "Fly", LegacyFly = "Legacy Fly", Noclip = "Noclip", GravityEnabled = "Gravity", ClickTP = "Click Teleport",
     TweenNoclip = "Tween Noclip", Fullbright = "Fullbright", NoFog = "No Fog", FOVEnabled = "Custom FOV",
     InfiniteZoom = "Infinite Zoom", ESP = "ESP", AntiAFK = "Anti-AFK", FPSUnlock = "FPS Unlock",
-    SpinBot = "Spinbot",
+    SpinBot = "Spinbot", Freecam = "Freecam",
 }
 
 local function applyFPS()
@@ -3021,6 +3100,7 @@ local KeybindTargets = {
     FullbrightKey = "Fullbright",
     ESPKey = "ESP",
     SpinBotKey = "SpinBot",
+    FreecamKey = "Freecam",
 }
 for keyIdx, toggleIdx in pairs(KeybindTargets) do
     Options[keyIdx]:OnClick(function()
@@ -3106,6 +3186,12 @@ connect(RunService.RenderStepped, function(dt)
         spinAngle = nil
     end
 
+    if Options.Freecam.Value then
+        startFreecam()
+    else
+        stopFreecam()
+    end
+
     updateRainbow()
     updateTracers()
 end)
@@ -3145,6 +3231,7 @@ unload = function()
     for _, cleanup in ipairs(GameModule.cleanups) do pcall(cleanup) end
     cancelTween()
     pcall(stopFly)
+    pcall(stopFreecam)
     pcall(restoreNoclip)
     pcall(applyState, true)
     pcall(clearESP)
