@@ -42,7 +42,7 @@ return {
         end
 
         local function update()
-            local solo = false
+            local solo = true
             set(toggle.Value and solo)
             if not toggle.Value then
                 status:SetDesc("Off")
