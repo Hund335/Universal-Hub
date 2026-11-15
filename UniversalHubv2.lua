@@ -913,6 +913,14 @@ do
     L:AddKeybind("FullbrightKey", { Title = "Keybind", Mode = "Toggle", Default = "L" })
     L:AddToggle("NoFog", { Title = "No fog", Default = false })
 
+    local H = Tabs.Visuals:AddSection("Hidden Parts")
+    H:AddToggle("ShowWalls", { Title = "Invisible walls", Description = "Invisible parts you collide with (blue)", Default = false })
+    H:AddToggle("ShowKillZones", { Title = "Kill / reset zones", Description = "Touch parts named kill, lava, death, reset, damage... (red)", Default = false })
+    H:AddToggle("ShowTriggers", { Title = "Touch triggers", Description = "Other invisible touch zones: teleports, checkpoints, events (yellow)", Default = false })
+    H:AddToggle("HiddenThroughWalls", { Title = "Show through walls", Default = true })
+    H:AddSlider("HiddenRange", { Title = "Range", Default = 300, Min = 50, Max = 2000, Increment = 50, Suffix = " studs" })
+    H:AddSlider("HiddenOpacity", { Title = "Visibility", Default = 0.5, Min = 0.1, Max = 1, Increment = 0.05 })
+
     local C = Tabs.Visuals:AddSection("Camera")
     C:AddToggle("FOVEnabled", { Title = "Custom FOV", Default = false })
     C:AddSlider("FOV", { Title = "Field of view", Default = 70, Min = 30, Max = 120, Increment = 1 })
@@ -3001,6 +3009,156 @@ do
 end
 
 ----------------------------------------------------------------------
+-- Hidden parts: invisible walls, kill/reset zones and touch triggers,
+-- drawn as boxes. The workspace is scanned once (in chunks so the game
+-- doesn't freeze) and kept up to date with DescendantAdded.
+----------------------------------------------------------------------
+local Hidden = { parts = {}, boxes = {}, scanned = false, scanning = false, conn = nil, folder = nil, timer = 0 }
+local HIDDEN_MAX = 600
+local HIDDEN_COLORS = {
+    wall = Color3.fromRGB(60, 140, 255),
+    kill = Color3.fromRGB(255, 45, 45),
+    trigger = Color3.fromRGB(255, 210, 40),
+}
+local HIDDEN_OPTION = { wall = "ShowWalls", kill = "ShowKillZones", trigger = "ShowTriggers" }
+local KILL_WORDS = { "kill", "death", "lava", "acid", "reset", "damage", "hurt", "spike", "laser", "poison", "toxic", "deadly" }
+
+local function isKillName(name)
+    name = name:lower()
+    for _, w in ipairs(KILL_WORDS) do
+        if name:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+-- Returns "kill", "wall", "trigger" or nil
+local function classifyPart(part)
+    if part.Name == "HumanoidRootPart" then return end
+    local touch = part:FindFirstChildOfClass("TouchTransmitter") ~= nil
+    if touch and (isKillName(part.Name) or (part.Parent and part.Parent ~= workspace and isKillName(part.Parent.Name))) then
+        return "kill"
+    end
+    if part.Transparency >= 0.9 then
+        if part.CanCollide then return "wall" end
+        if touch then return "trigger" end
+    end
+end
+
+local function isCharacterPart(part)
+    local model = part:FindFirstAncestorOfClass("Model")
+    return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
+end
+
+local function considerPart(part)
+    if part:IsA("BasePart") and not part:IsA("Terrain") and classifyPart(part) and not isCharacterPart(part) then
+        Hidden.parts[part] = true
+    end
+end
+
+local function scanHidden()
+    if Hidden.scanned or Hidden.scanning then return end
+    Hidden.scanning = true
+    task.spawn(function()
+        local all = workspace:GetDescendants()
+        for i, obj in ipairs(all) do
+            if obj:IsA("BasePart") then considerPart(obj) end
+            if i % 4000 == 0 then task.wait() end
+            if Library.Unloaded then Hidden.scanning = false return end
+        end
+        -- new parts, and parts that get a touch handler later
+        Hidden.conn = workspace.DescendantAdded:Connect(function(obj)
+            if obj:IsA("BasePart") then
+                considerPart(obj)
+            elseif obj:IsA("TouchTransmitter") and obj.Parent and obj.Parent:IsA("BasePart") then
+                considerPart(obj.Parent)
+            end
+        end)
+        table.insert(Connections, Hidden.conn)
+        Hidden.scanned = true
+        Hidden.scanning = false
+    end)
+end
+
+local function clearHiddenBoxes()
+    for part, box in pairs(Hidden.boxes) do
+        pcall(function() box:Destroy() end)
+        Hidden.boxes[part] = nil
+    end
+end
+
+local function updateHidden()
+    local any = false
+    for _, opt in pairs(HIDDEN_OPTION) do
+        if Options[opt].Value then any = true break end
+    end
+    if not any then
+        clearHiddenBoxes()
+        return
+    end
+    scanHidden()
+
+    if not (Hidden.folder and Hidden.folder.Parent) then
+        Hidden.folder = Instance.new("Folder")
+        Hidden.folder.Name = "UH_HiddenParts"
+        Hidden.folder.Parent = guiParent
+    end
+
+    local hrp = getHRP()
+    local cam = workspace.CurrentCamera
+    local origin = (hrp and hrp.Position) or (cam and cam.CFrame.Position)
+    if not origin then return end
+    local range = Options.HiddenRange.Value
+
+    local found = {}
+    for part in pairs(Hidden.parts) do
+        if not part.Parent then
+            Hidden.parts[part] = nil
+        else
+            local dist = (part.Position - origin).Magnitude - part.Size.Magnitude / 2
+            if dist <= range then
+                local kind = classifyPart(part) -- re-check, games change these at runtime
+                if kind and Options[HIDDEN_OPTION[kind]].Value then
+                    table.insert(found, { part = part, kind = kind, dist = dist })
+                end
+            end
+        end
+    end
+    table.sort(found, function(a, b) return a.dist < b.dist end)
+
+    local keep = {}
+    local onTop = Options.HiddenThroughWalls.Value
+    local transparency = 1 - Options.HiddenOpacity.Value
+    for i = 1, math.min(#found, HIDDEN_MAX) do
+        local f = found[i]
+        keep[f.part] = true
+        local box = Hidden.boxes[f.part]
+        if not box then
+            box = Instance.new("BoxHandleAdornment")
+            box.Adornee = f.part
+            box.ZIndex = 1
+            box.Parent = Hidden.folder
+            Hidden.boxes[f.part] = box
+        end
+        box.Size = f.part.Size
+        box.Color3 = HIDDEN_COLORS[f.kind]
+        box.AlwaysOnTop = onTop
+        box.Transparency = transparency
+    end
+    for part, box in pairs(Hidden.boxes) do
+        if not keep[part] then
+            pcall(function() box:Destroy() end)
+            Hidden.boxes[part] = nil
+        end
+    end
+end
+
+local function clearHidden()
+    clearHiddenBoxes()
+    if Hidden.folder then pcall(function() Hidden.folder:Destroy() end) end
+    Hidden.folder = nil
+end
+
+----------------------------------------------------------------------
 -- Freecam: detaches the camera and flies it around on its own. Your
 -- character is anchored in place meanwhile so WASD doesn't walk it.
 ----------------------------------------------------------------------
@@ -3085,6 +3243,7 @@ local ToggleLabels = {
     TweenNoclip = "Tween Noclip", Fullbright = "Fullbright", NoFog = "No Fog", FOVEnabled = "Custom FOV",
     InfiniteZoom = "Infinite Zoom", ESP = "ESP", AntiAFK = "Anti-AFK", FPSUnlock = "FPS Unlock",
     SpinBot = "Spinbot", Freecam = "Freecam",
+    ShowWalls = "Invisible Walls", ShowKillZones = "Kill Zones", ShowTriggers = "Touch Triggers",
 }
 
 local function applyFPS()
@@ -3231,6 +3390,12 @@ connect(RunService.Heartbeat, function(dt)
         espTimer = 0
         updateESP()
     end
+
+    Hidden.timer += dt
+    if Hidden.timer >= 0.5 then
+        Hidden.timer = 0
+        updateHidden()
+    end
 end)
 
 ----------------------------------------------------------------------
@@ -3250,6 +3415,7 @@ unload = function()
     cancelTween()
     pcall(stopFly)
     pcall(stopFreecam)
+    pcall(clearHidden)
     pcall(restoreNoclip)
     pcall(applyState, true)
     pcall(clearESP)
