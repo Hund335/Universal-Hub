@@ -933,6 +933,10 @@ do
     C:AddToggle("Freecam", { Title = "Freecam", Description = "WASD move, E/Q up/down, Shift fast, hold right mouse to look", Default = false })
     C:AddKeybind("FreecamKey", { Title = "Freecam keybind", Mode = "Toggle", Default = "P" })
     C:AddSlider("FreecamSpeed", { Title = "Freecam speed", Default = 50, Min = 5, Max = 300, Increment = 5, Suffix = " studs/s" })
+    C:AddToggle("ZoomEnabled", { Title = "Cursor zoom", Description = "Press the key to zoom in on what your cursor points at; scroll to zoom more or less", Default = false })
+    C:AddKeybind("ZoomKey", { Title = "Zoom key", Mode = "Toggle", Default = "Z" })
+    C:AddDropdown("ZoomMode", { Title = "Zoom mode", Values = { "Hold", "Toggle" }, Default = "Hold" })
+    C:AddSlider("ZoomStart", { Title = "Starting zoom", Default = 4, Min = 1.5, Max = 20, Increment = 0.5, Suffix = "x" })
     if canFPS then
         C:AddToggle("FPSUnlock", { Title = "FPS unlock", Default = false })
         C:AddSlider("FPSCap", { Title = "FPS cap", Default = 240, Min = 30, Max = 1000, Increment = 10 })
@@ -1143,6 +1147,7 @@ end)
 -- restored when it turns off (or when the hub unloads)
 ----------------------------------------------------------------------
 local Orig = {}
+local Zoom = { active = false, level = 4, target = nil, fov = nil } -- cursor zoom state (see "Cursor zoom")
 
 -- Keeps obj[prop] = value while `enabled`; restores the original value afterwards.
 -- If obj changes (e.g. new Humanoid after respawn) the original value is kept.
@@ -1228,7 +1233,10 @@ local function applyState(off)
 
     -- Camera
     if cam then
-        hold("FOV", on("FOVEnabled"), cam, "FieldOfView", Options.FOV.Value)
+        -- cursor zoom drives the FOV itself while it's active
+        if not Zoom.active then
+            hold("FOV", on("FOVEnabled"), cam, "FieldOfView", Options.FOV.Value)
+        end
     end
     local zoom = on("InfiniteZoom")
     hold("MaxZoom", zoom, LP, "CameraMaxZoomDistance", 100000)
@@ -3286,6 +3294,91 @@ local function startFreecam()
 end
 
 ----------------------------------------------------------------------
+-- Cursor zoom: points the camera at what the cursor is over and narrows
+-- the field of view. The scroll wheel changes the zoom while it's active
+-- (and doesn't move the normal camera in or out meanwhile).
+----------------------------------------------------------------------
+local ZOOM_STEP = "UniversalHub_Zoom"
+local ZOOM_ACTION = "UniversalHub_ZoomWheel"
+local ZOOM_MAX = 60
+local CAS = game:GetService("ContextActionService")
+local zoomParams = RaycastParams.new()
+zoomParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function stopZoom()
+    if not Zoom.active then return end
+    Zoom.active = false
+    pcall(function() RunService:UnbindFromRenderStep(ZOOM_STEP) end)
+    pcall(function() CAS:UnbindAction(ZOOM_ACTION) end)
+    local cam = workspace.CurrentCamera
+    if cam and Zoom.fov then cam.FieldOfView = Zoom.fov end
+end
+
+local function startZoom()
+    if Zoom.active or Freecam.active then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    -- What is under the cursor?
+    local mouse = UIS:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(mouse.X, mouse.Y)
+    zoomParams.FilterDescendantsInstances = LP.Character and { LP.Character } or {}
+    local hit = workspace:Raycast(ray.Origin, ray.Direction * 5000, zoomParams)
+    Zoom.target = hit and hit.Position or (ray.Origin + ray.Direction * 5000)
+
+    Zoom.active = true
+    Zoom.fov = Options.FOVEnabled.Value and Options.FOV.Value or cam.FieldOfView
+    Zoom.level = Options.ZoomStart.Value
+
+    CAS:BindActionAtPriority(ZOOM_ACTION, function(_, state, input)
+        if state == Enum.UserInputState.Change then
+            local factor = input.Position.Z > 0 and 1.25 or 1 / 1.25
+            Zoom.level = math.clamp(Zoom.level * factor, 1, ZOOM_MAX)
+        end
+        return Enum.ContextActionResult.Sink
+    end, false, 3000, Enum.UserInputType.MouseWheel)
+
+    RunService:BindToRenderStep(ZOOM_STEP, Enum.RenderPriority.Camera.Value + 3, function()
+        local c = workspace.CurrentCamera
+        if not c then return end
+        local pos = c.CFrame.Position
+        if (Zoom.target - pos).Magnitude > 0.1 then
+            c.CFrame = CFrame.lookAt(pos, Zoom.target)
+        end
+        -- FOV is an angle, so divide the tangent rather than the angle itself
+        local half = math.rad(Zoom.fov / 2)
+        c.FieldOfView = math.deg(2 * math.atan(math.tan(half) / Zoom.level))
+    end)
+end
+
+-- Called every frame: decides whether zoom should be on
+local zoomToggled = false
+local function updateZoom()
+    local want = false
+    if Options.ZoomEnabled.Value and not UIS:GetFocusedTextBox() then
+        if Options.ZoomMode.Value == "Hold" then
+            local ok, key = pcall(function() return Enum.KeyCode[Options.ZoomKey.Value] end)
+            if ok and key then
+                want = UIS:IsKeyDown(key)
+            else
+                local mb = ({ MB1 = Enum.UserInputType.MouseButton1, MB2 = Enum.UserInputType.MouseButton2 })[Options.ZoomKey.Value]
+                want = mb ~= nil and UIS:IsMouseButtonPressed(mb)
+            end
+        else
+            want = zoomToggled
+        end
+    else
+        zoomToggled = false
+    end
+    if want then startZoom() else stopZoom() end
+end
+
+Options.ZoomKey:OnClick(function()
+    if UIS:GetFocusedTextBox() or Options.ZoomMode.Value ~= "Toggle" then return end
+    zoomToggled = not zoomToggled
+end)
+
+----------------------------------------------------------------------
 -- Wiring: notifications, keybinds, events
 ----------------------------------------------------------------------
 local ToggleLabels = {
@@ -3295,6 +3388,7 @@ local ToggleLabels = {
     InfiniteZoom = "Infinite Zoom", ESP = "ESP", AntiAFK = "Anti-AFK", FPSUnlock = "FPS Unlock",
     SpinBot = "Spinbot", Freecam = "Freecam",
     ShowWalls = "Invisible Walls", ShowKillZones = "Kill Zones", ShowTriggers = "Touch Triggers",
+    ZoomEnabled = "Cursor Zoom",
 }
 
 local function applyFPS()
@@ -3414,6 +3508,8 @@ connect(RunService.RenderStepped, function(dt)
         spinAngle = nil
     end
 
+    updateZoom()
+
     if Options.Freecam.Value then
         startFreecam()
     else
@@ -3466,6 +3562,7 @@ unload = function()
     cancelTween()
     pcall(stopFly)
     pcall(stopFreecam)
+    pcall(stopZoom)
     pcall(clearHidden)
     pcall(restoreNoclip)
     pcall(applyState, true)
