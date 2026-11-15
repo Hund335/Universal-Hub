@@ -887,6 +887,11 @@ do
     EC:AddColorpicker("ESPColor", { Title = "Color", Default = Color3.fromRGB(255, 70, 70) })
     EC:AddToggle("ESPVisibleCheck", { Title = "Different color when in sight", Description = "When nothing blocks your view of them", Default = true })
     EC:AddColorpicker("ESPVisibleColor", { Title = "In-sight color", Default = Color3.fromRGB(60, 220, 90) })
+    EC:AddToggle("ESPWallColors", { Title = "Color by wall count", Description = "Changes color depending on how many walls are between you and them", Default = false })
+    EC:AddColorpicker("ESPWall1Color", { Title = "1 wall", Default = Color3.fromRGB(255, 220, 40) })
+    EC:AddColorpicker("ESPWall2Color", { Title = "2 walls", Default = Color3.fromRGB(255, 140, 0) })
+    EC:AddColorpicker("ESPWall3Color", { Title = "3+ walls", Default = Color3.fromRGB(200, 30, 30) })
+    EC:AddToggle("ESPWallLabel", { Title = "Show wall count in name", Default = false })
     EC:AddToggle("ESPTeamColor", { Title = "Use team colors", Default = false })
     EC:AddToggle("ESPRainbow", { Title = "Rainbow mode", Description = "Cycles through all colors", Default = false })
     EC:AddSlider("ESPRainbowSpeed", { Title = "Rainbow speed", Default = 0.5, Min = 0.1, Max = 3, Increment = 0.1 })
@@ -1448,6 +1453,38 @@ local function isInSight(char)
     return false
 end
 
+-- Number of walls between the camera and the character (0..3, 3 = "3 or more").
+-- Hits less than 1 stud apart count as the same wall (thick walls are often
+-- several parts). See-through parts don't count.
+local WALL_CAP = 3
+local function countWalls(char)
+    local cam = workspace.CurrentCamera
+    local target = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+    if not (cam and target) then return 0 end
+    local origin = cam.CFrame.Position
+    local goal = target.Position
+    local ignore = { char }
+    if LP.Character then table.insert(ignore, LP.Character) end
+
+    local walls, lastHit = 0, nil
+    for _ = 1, 12 do
+        local direction = goal - origin
+        if direction.Magnitude < 0.05 then break end
+        sightParams.FilterDescendantsInstances = ignore
+        local hit = workspace:Raycast(origin, direction, sightParams)
+        if not hit then break end
+        if hit.Instance.Transparency < 0.8 and not (lastHit and (hit.Position - lastHit).Magnitude < 1) then
+            walls += 1
+            if walls >= WALL_CAP then break end
+        end
+        if hit.Instance.Transparency < 0.8 then lastHit = hit.Position end
+        table.insert(ignore, hit.Instance)
+        -- continue from the hit point so each part is passed once
+        origin = hit.Position
+    end
+    return walls
+end
+
 -- Hue cycles over time; Rainbow speed = full cycles per second
 local function rainbowColor()
     return Color3.fromHSV((os.clock() * Options.ESPRainbowSpeed.Value) % 1, 1, 1)
@@ -1472,9 +1509,20 @@ local function updateESP()
 
             if show then
                 local e = getESP(p)
-                -- Color priority (lowest to highest): base / team colors, in sight, rainbow, team mode
+                -- Color priority (lowest to highest): base / team colors, in sight or
+                -- wall count, rainbow, team mode
                 local color = (Options.ESPTeamColor.Value and p.Team) and p.TeamColor.Color or Options.ESPColor.Value
-                if Options.ESPVisibleCheck.Value and isInSight(char) then
+                local walls
+                if Options.ESPWallColors.Value or Options.ESPWallLabel.Value then
+                    walls = countWalls(char)
+                end
+                if Options.ESPWallColors.Value then
+                    if walls == 0 then
+                        if Options.ESPVisibleCheck.Value then color = Options.ESPVisibleColor.Value end
+                    else
+                        color = Options["ESPWall" .. math.min(walls, WALL_CAP) .. "Color"].Value
+                    end
+                elseif Options.ESPVisibleCheck.Value and isInSight(char) then
                     color = Options.ESPVisibleColor.Value
                 end
                 local teamMode = Options.ESPTeamMode.Value and isTeammate
@@ -1490,6 +1538,9 @@ local function updateESP()
                 local parts = {}
                 if Options.ESPNames.Value then table.insert(parts, p.DisplayName) end
                 if Options.ESPDistance.Value then table.insert(parts, ("[%d]"):format(math.floor(dist))) end
+                if Options.ESPWallLabel.Value and walls then
+                    table.insert(parts, walls >= WALL_CAP and "(3+ walls)" or walls == 1 and "(1 wall)" or ("(%d walls)"):format(walls))
+                end
                 e.label.Text = table.concat(parts, " ")
                 e.label.TextColor3 = color
                 e.bb.Enabled = #parts > 0
