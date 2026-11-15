@@ -39,9 +39,27 @@ local Mouse = LP:GetMouse()
 ----------------------------------------------------------------------
 -- Libraries
 ----------------------------------------------------------------------
-local Library          = loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Fluent-Custom/main/Fluent.lua"))()
-local SaveManager      = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+-- GitHub sometimes answers with a plain-text error page ("Too Many Requests")
+-- instead of the file; retry a few times instead of failing on it.
+local function fetchScript(url)
+    local lastErr
+    for attempt = 1, 5 do
+        local ok, body = pcall(game.HttpGet, game, url)
+        if ok and type(body) == "string" then
+            local fn = loadstring(body)
+            if fn then return fn end
+            lastErr = body:sub(1, 60)
+        else
+            lastErr = tostring(body)
+        end
+        task.wait(attempt)
+    end
+    error(("Universal Hub: couldn't load %s (%s)"):format(url, tostring(lastErr)), 0)
+end
+
+local Library          = fetchScript("https://raw.githubusercontent.com/Hund335/Fluent-Custom/main/Fluent.lua")()
+local SaveManager      = fetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua")()
+local InterfaceManager = fetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua")()
 local Options = Library.Options
 
 ----------------------------------------------------------------------
@@ -1001,7 +1019,7 @@ end
 -- Re-run the hub after any teleport (server hop, rejoin, game teleports) so
 -- auto-start automations keep going in the new server
 local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-local LOAD_LINE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Universal-Hub/main/loader.lua"))()'
+local LOAD_LINE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Hund335/Universal-Hub/main/loaderv2.lua"))()'
 local teleportQueued = false
 local function queueHubReload()
     if teleportQueued or not queueTeleport or not (Options.KeepAfterTeleport and Options.KeepAfterTeleport.Value) then return end
