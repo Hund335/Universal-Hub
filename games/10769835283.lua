@@ -116,21 +116,31 @@ return {
         ------------------------------------------------------------------
         local worms = hub.Tab:AddSection("Worms")
 
-        -- The game's WormClient keeps live worms in a table {id = {pos=, born=, heading=, ...}}.
-        local wormTable
-        local function findWorms()
-            if wormTable then return wormTable end
-            if not getgc then return end
-            for _, t in ipairs(getgc(true)) do
-                if type(t) == "table" then
-                    local _, v = next(t)
-                    if type(v) == "table" and rawget(v, "born") and rawget(v, "heading") then
-                        wormTable = t
-                        return t
+        -- We track worms ourselves from the spawn/collect events. The worms that
+        -- already exist are read once from the game's WormClient table
+        -- {id = {pos=, born=, heading=, ...}} with a single getgc (getgc is very
+        -- heavy in this game, so it must never run in a loop).
+        local wormList = {}
+        if getgc then
+            pcall(function()
+                for _, t in ipairs(getgc(true)) do
+                    if type(t) == "table" then
+                        local _, v = next(t)
+                        if type(v) == "table" and rawget(v, "born") and rawget(v, "heading") then
+                            for id, w in pairs(t) do wormList[id] = { pos = w.at or w.pos } end
+                            break
+                        end
                     end
                 end
-            end
+            end)
         end
+        hub.connect(Remotes.WormSpawned.OnClientEvent, function(id, pos)
+            wormList[id] = { pos = pos }
+        end)
+        hub.connect(Remotes.WormCollected.OnClientEvent, function(id)
+            wormList[id] = nil
+        end)
+        local function findWorms() return wormList end
 
         local minWorms = worms:AddSlider(hub.id("WormMin"), {
             Title = "Collect when at least",
@@ -150,7 +160,7 @@ return {
 
             local targets = {}
             for id, w in pairs(list) do
-                local p = w.at or w.pos
+                local p = w.pos
                 if typeof(p) == "Vector3" then table.insert(targets, { id = id, pos = p }) end
             end
             if #targets < minWorms.Value then return end
@@ -163,6 +173,8 @@ return {
                 hrp.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.12)
                 Remotes.WormCollected:FireServer(t.id)
+                -- drop it locally too, so a worm the server already removed isn't visited forever
+                list[t.id] = nil
             end
             task.wait(0.2)
             if hrp.Parent then hrp.CFrame = home end
@@ -171,10 +183,9 @@ return {
 
         local wormInfo = worms:AddParagraph({ Title = "Worms on your plot", Content = "..." })
         hub.loop(1, function()
-            local list = findWorms()
             local n = 0
-            if list then for _ in pairs(list) do n += 1 end end
-            wormInfo:SetDesc(list and (n .. " waiting") or "Worm list not found yet")
+            for _ in pairs(wormList) do n += 1 end
+            wormInfo:SetDesc(n .. " waiting")
         end)
 
         hub.addHelper("steps", function() return attr("Steps") end)
